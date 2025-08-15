@@ -1,0 +1,10 @@
+# Исключаем файлы, которые не должны попасть в Docker-образ
+
+Dockerfile
+.dockerignore
+cloudbuild.yaml
+firebase_admin_sdk_key.json
+
+# Исключаем виртуальное окружение и кэш Python
+venv/
+__pycache__/

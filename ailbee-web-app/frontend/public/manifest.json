@@ -1,0 +1,26 @@
+{
+    "short_name": "ailbee",
+    "name": "ailbee",
+    "icons": [
+      {
+        "src": "favicon.png",
+        "sizes": "200x200",
+        "type": "image/png"
+      },
+      {
+        "src": "logo_dark.png",
+        "type": "image/png",
+        "sizes": "1000x1000"
+      },
+      {
+        "src": "logo_light.png",
+        "type": "image/png",
+        "sizes": "1000x1000"
+      }
+    ],
+    "start_url": ".",
+    "display": "standalone",
+    "theme_color": "#000000",
+    "background_color": "#ffffff"
+  }
+  

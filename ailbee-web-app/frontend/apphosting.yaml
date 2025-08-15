@@ -1,0 +1,12 @@
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', 'gcr.io/${PROJECT_ID}/frontend', '.']
+  dir: '.' # Убедитесь, что это запускается в корне фронтенд-проекта
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['run', '--rm', '--entrypoint', 'tar', 'gcr.io/${PROJECT_ID}/frontend', 'cvf', '/tmp/build.tar', 'build']
+  id: 'extract-build'
+  dir: '.'
+- name: 'gcr.io/cloud-builders/gsutil'
+  args: ['cp', '/tmp/build.tar', 'gs://${PROJECT_ID}-firebase-hosting-builds/frontend.tar']
+  id: 'upload-build-to-gcs'
+  dir: '.'
