@@ -2,7 +2,6 @@
 
 Dockerfile
 .dockerignore
-cloudbuild.yaml
 firebase_admin_sdk_key.json
 
 # Исключаем виртуальное окружение и кэш Python

@@ -276,6 +276,21 @@ const Dashboard = () => {
     throw new Error('Все попытки повтора завершились неудачей.');
   };
 
+  // Helper function for centralized API error handling
+  const handleApiError = async (response, contextMessage, setErrorState) => {
+    const errorPrefix = `Ошибка ${contextMessage}.`;
+    console.error(`Dashboard: HTTP ошибка ${response.status}: ${response.statusText}`);
+
+    try {
+      const errorBody = await response.json(); // Attempt to parse JSON error
+      const errorMessage = errorBody.detail || `Статус: ${response.status} ${response.statusText}`;
+      console.error("Dashboard: Детали ошибки из ответа:", errorBody);
+      setErrorState(`${errorPrefix} ${errorMessage}`);
+    } catch (e) {
+      const errorBodyText = await response.text(); // Fallback to text if JSON parsing fails
+      setErrorState(`${errorPrefix} Статус: ${response.status} ${response.statusText}. Детали: ${errorBodyText}`);
+    }
+  };
 
   const fetchBooks = async (subject, educationLevel) => {
     if (!currentUser) {
@@ -328,22 +343,20 @@ const Dashboard = () => {
         credentials: 'include'
       });
 
-      let result;
       if (response.ok) {
-        result = await response.json();
+        const result = await response.json();
+        // Проверка ожидаемой структуры ответа
+        if (!result || !Array.isArray(result.books)) {
+          console.error("Dashboard: Получен некорректный формат ответа при загрузке книг:", result);
+          setBooksError('Получен некорректный формат данных книг от сервера.');
+          setBooks([]); // Очистить список книг при некорректном ответе
+          return; // Прекратить выполнение при ошибке
+        }
         setBooks(result.books);
         console.log("Dashboard: Книги успешно получены:", result.books);
       } else {
-        const errorBody = await response.text();
-        console.error(`Dashboard: HTTP ошибка ${response.status}: ${response.statusText}`);
-        console.error("Dashboard: Тело ответа при ошибке:", errorBody);
-        try {
-            const errorJson = JSON.parse(errorBody);
-            setBooksError(errorJson.detail || `Ошибка при получении списка книг. Статус: ${response.status} ${response.statusText}`);
-        } catch (e) {
-            setBooksError(`Ошибка при получении списка книг. Статус: ${response.status} ${response.statusText}. Детали: ${errorBody}`);
-        }
-        console.error("Dashboard: Ошибка получения книг:", result);
+        // Использование централизованной функции обработки ошибок
+        await handleApiError(response, "при получении списка книг", setBooksError);
       }
     } catch (err) {
       console.error("Dashboard: ОШИБКА FETCH - URL:", fetchUrl, "Ошибка:", err);
@@ -389,22 +402,19 @@ const Dashboard = () => {
         body: JSON.stringify({ text: bookDescription }),
       });
 
-      let result;
       if (response.ok) {
-        result = await response.json();
+        const result = await response.json();
+        // Проверка ожидаемой структуры ответа
+        if (!result || typeof result.summary !== 'string') {
+             console.error("Dashboard: Получен некорректный формат ответа при суммировании:", result);
+             setBooksError('Получен некорректный формат суммирования от сервера.');
+             setSummarizedText(null); // Очистить суммированный текст
+             return; // Прекратить выполнение при ошибке
+        }
         setSummarizedText(result.summary);
         console.log("Dashboard: Суммирование успешно:", result.summary);
       } else {
-        const errorBody = await response.text();
-        console.error(`Dashboard: HTTP ошибка ${response.status}: ${response.statusText}`);
-        console.error("Dashboard: Тело ответа при ошибке:", errorBody);
-        try {
-            const errorJson = JSON.parse(errorBody);
-            setBooksError(errorJson.detail || `Ошибка при суммировании текста. Статус: ${response.status} ${response.statusText}`);
-        } catch (e) {
-            setBooksError(`Ошибка при суммировании текста. Статус: ${response.status} ${response.statusText}. Детали: ${errorBody}`);
-        }
-        console.error("Dashboard: Ошибка суммирования:", result);
+        await handleApiError(response, "при суммировании текста", setBooksError);
       }
     } catch (err) {
       console.error("Dashboard: ОШИБКА LLM SUMMARIZE FETCH - Ошибка:", err);

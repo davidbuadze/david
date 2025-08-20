@@ -12,6 +12,7 @@ import datetime
 import numpy as np
 # Firebase Admin SDK
 import firebase_admin
+import logging
 from firebase_admin import credentials, auth, firestore
 from fastapi.middleware.cors import CORSMiddleware
 from google.api_core import exceptions as google_exceptions
@@ -26,6 +27,9 @@ from google.cloud import storage
 # Libraries for document parsing
 from pypdf import PdfReader
 from docx import Document
+
+# Configure basic logging
+logging.basicConfig(level=logging.INFO)
 
 # --- Глобальные переменные для Firebase и GCP ---
 # Получаем ID проекта и имя бакета из переменных окружения
@@ -80,19 +84,24 @@ try:
 except Exception as e:
     print(f"Предупреждение: Не удалось инициализировать Cloud Storage Client: {e}. Функции хранилища будут недоступны.")
 
-
 app = FastAPI(
     title="Обучающее Приложение Backend API",
     description="API для управления пользователями, обучающими планами, LLM-агентом и RAG.",
     version="0.1.0",
 )
 
+@app.on_event("startup")
+async def startup_event():
+    print("Запуск приложения: Выполнение инициализации коллекций...")
+    await initialize_collections()
+    print("Запуск приложения: Инициализация коллекций завершена.")
+
 # --- Настройка CORS Middleware ---
 
 # Лучшая практика: загружать разрешенные источники из переменной окружения.
 # Это позволяет легко изменять их для разных сред (разработка, продакшн)
 # без изменения кода.
-# Пример переменной в Cloud Run: "https://aituiton.web.app,https://aituiton.firebaseapp.com"
+# Пример переменной в Cloud Run: "https://ailbee.web.app,https://ailbee.firebaseapp.com"
 CORS_ALLOWED_ORIGINS = os.environ.get("CORS_ALLOWED_ORIGINS")
 
 if CORS_ALLOWED_ORIGINS:
@@ -103,8 +112,8 @@ else:
     # В продакшене настоятельно рекомендуется использовать переменную окружения.
     print("Предупреждение: Переменная окружения CORS_ALLOWED_ORIGINS не установлена. Используется список по умолчанию для разработки.")
     origins = [
-        "https://aituiton.web.app",
-        "https://aituiton.firebaseapp.com",
+        "https://ailbee.web.app",
+        "https://ailbee.firebaseapp.com",
         "http://localhost:3000", # Для React/Next.js
         "http://localhost:8000", # Для локального тестирования бэкенда
     ]
@@ -208,6 +217,102 @@ def convert_timestamps_to_strings(data: Any) -> Any:
     else:
         return data
 
+# --- Глобальные обработчики исключений ---
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+ """
+ Handles FastAPI HTTPExceptions and returns a standardized JSON response.
+ """
+ logging.error(f"HTTP Exception occurred: {exc.status_code} - {exc.detail}")
+ return JSONResponse(
+ status_code=exc.status_code,
+ content={"status": "error", "message": exc.detail}
+ )
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+ """
+ Handles all other exceptions and returns a generic 500 error response.
+ """
+ logging.error(f"An unhandled exception occurred: {exc}", exc_info=True) # Log traceback
+ return JSONResponse(status_code=500, content={"status": "error", "message": "Произошла внутренняя ошибка сервера."})
+
+# --- Вспомогательная функция для генерации стандартизированных ответов об ошибках ---
+def generate_error_response(status_code: int, detail: Any) -> JSONResponse:
+    """
+    Генерирует стандартизированный JSON-ответ об ошибке.
+    """
+    # В detail может быть строка или словарь (из HTTPException)
+    error_message = detail if isinstance(detail, str) else detail.get('detail', 'Произошла неизвестная ошибка.')
+    return JSONResponse(
+        status_code=status_code,
+        content={"status": "error", "message": error_message}
+    )
+
+    # --- Инициализация коллекций с начальными данными ---
+async def initialize_collections():
+    """
+    Инициализирует коллекции subjects и educationLevels, если они пусты.
+    Эта функция выполняется при запуске приложения.
+    """
+    if db is None:
+        print("Пропуск инициализации коллекций: Firestore DB не инициализирован.")
+        return
+
+    subjects_ref = db.collection('subjects')
+    education_levels_ref = db.collection('educationLevels')
+
+    try:
+        # Проверяем, пуста ли коллекция subjects
+        # Используем .limit(1) и .get() для более эффективной проверки наличия документов
+        subjects_docs = subjects_ref.limit(1).get()
+        if not subjects_docs: # Проверяем, пустой ли список документов
+            print("Инициализация коллекции 'subjects'...")
+            subjects_data = [
+                {"id": "Математика", "name": "Математика"},
+                {"id": "Биология", "name": "Биология"},
+                {"id": "История", "name": "История"},
+                {"id": "Физика", "name": "Физика"},
+                {"id": "Литература", "name": "Литература"},
+                {"id": "Химия", "name": "Химия"},
+                {"id": "Информатика", "name": "Информатика"},
+                {"id": "Психология", "name": "Психология"}
+            ]
+            batch = db.batch()
+            for subject in subjects_data:
+                # Убеждаемся, что документ создается с ID, указанным в JSON
+                doc_ref = subjects_ref.document(subject["id"])
+                batch.set(doc_ref, subject)
+            await batch.commit()
+            print("Коллекция 'subjects' успешно инициализирована.")
+        else:
+            print("Коллекция 'subjects' уже содержит данные. Пропуск инициализации.")
+
+        # Проверяем, пуста ли коллекция educationLevels
+        education_levels_docs = education_levels_ref.limit(1).get()
+        if not education_levels_docs: # Проверяем, пустой ли список документов
+            print("Инициализация коллекции 'educationLevels'...")
+            education_levels_data = [
+                {"id": "primary", "name": "Начальные классы"},
+                {"id": "middle", "name": "Средняя школа"},
+                {"id": "high", "name": "Старшие классы"},
+                {"id": "university", "name": "Университет"},
+                {"id": "professional", "name": "Профессиональный"}
+            ]
+            batch = db.batch()
+            for level in education_levels_data:
+                 # Убеждаемся, что документ создается с ID, указанным в JSON
+                doc_ref = education_levels_ref.document(level["id"])
+                batch.set(doc_ref, level)
+            await batch.commit()
+            print("Коллекция 'educationLevels' успешно инициализирована.")
+        else:
+            print("Коллекция 'educationLevels' уже содержит данные. Пропуск инициализации.")
+
+    except Exception as e:
+        print(f"Ошибка при инициализации коллекций: {e}")
+        # Не поднимаем исключение здесь, чтобы не блокировать запуск приложения полностью
+
 # --- Зависимость для проверки Firebase ID Token ---
 async def get_current_user(request: Request):
     """
@@ -232,6 +337,27 @@ async def get_current_user(request: Request):
 # --- Имитация векторной базы данных в памяти ---
 MOCKED_VECTOR_DB: Dict[str, Dict[str, Any]] = {}
 MOCKED_DOC_CHUNKS_MAP: Dict[str, List[str]] = {}
+
+# --- Зависимость для проверки Firebase ID Token ---
+async def get_current_user(request: Request):
+    """
+    Проверяет Firebase ID Token из заголовка Authorization.
+    Возвращает UID пользователя.
+    """
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Отсутствует заголовок авторизации")
+
+    token = auth_header.split('Bearer ')[1] if 'Bearer ' in auth_header else None
+    if not token:
+        raise HTTPException(status_code=401, detail="Неверный формат токена")
+
+    try:
+        decoded_token = auth.verify_id_token(token)
+        request.state.user_id = decoded_token['uid']
+        return decoded_token['uid']
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Недействительный токен: {e}")
 
 # --- Вспомогательные функции для RAG ---
 
@@ -305,7 +431,10 @@ async def retrieve_relevant_context(query: str, document_ids: List[str]) -> str:
 
     try:
         query_embedding = np.array(await generate_embedding_for_text(query))
+    except HTTPException as e:
+        raise e # Перебрасываем HTTPException из generate_embedding_for_text
     except Exception as e:
+        print(f"Ошибка при генерации эмбеддинга для запроса: {e}")
         raise HTTPException(status_code=500, detail=f"Не удалось сгенерировать эмбеддинг для запроса: {e}")
 
     candidate_chunks = []
@@ -360,7 +489,8 @@ async def options_handler(path: str):
 async def save_generic_data(payload: FrontendSaveDataPayload, user_id: str = Depends(get_current_user)):
     # Проверяем, что db инициализирован
     if db is None:
-        raise HTTPException(status_code=500, detail="Firestore DB не инициализирован.")
+        # Используем вспомогательную функцию для стандартизированного ответа
+        return generate_error_response(status_code=500, detail="Firestore DB не инициализирован.")
     data_to_save = payload.data
     data_to_save["timestamp"] = firestore.SERVER_TIMESTAMP 
 
@@ -368,30 +498,30 @@ async def save_generic_data(payload: FrontendSaveDataPayload, user_id: str = Dep
         doc_ref = db.collection('users').document(user_id).collection('generic_data').document('my_data')
         doc_ref.set(data_to_save)
         print(f"Generic data saved for user {user_id} in Firestore: {data_to_save.get('content')[:50]}...")
-        return JSONResponse(status_code=200, content={"message": "Данные успешно сохранены!", "saved_data": data_to_save})
+        return JSONResponse(status_code=200, content={"status": "success", "message": "Данные успешно сохранены!", "saved_data": data_to_save})
     except Exception as e:
-        print(f"Error saving generic data for {user_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка сервера при сохранении данных: {e}")
+ # Let the global exception handler handle this
+ raise e
 
-@app.get("/get_data/{user_id}")
+@app.get("/get_data")
 async def get_generic_data(user_id: str = Depends(get_current_user)):
     if db is None:
-        raise HTTPException(status_code=500, detail="Firestore DB не инициализирован.")
+        # Используем вспомогательную функцию для стандартизированного ответа
+        return generate_error_response(status_code=500, detail="Firestore DB не инициализирован.")
     try:
         doc_ref = db.collection('users').document(user_id).collection('generic_data').document('my_data')
         doc = doc_ref.get()
 
         if not doc.exists:
             print(f"No generic data found for user {user_id}.")
-            return JSONResponse(status_code=200, content={"message": "Данные не найдены.", "data": None})
+            return JSONResponse(status_code=200, content={"status": "success", "message": "Данные не найдены.", "data": None})
 
         data = doc.to_dict()
         data = convert_timestamps_to_strings(data)
         print(f"Generic data retrieved for user {user_id} from Firestore: {data.get('content')[:50]}...")
-        return JSONResponse(status_code=200, content={"message": "Данные успешно получены!", "data": data})
-    except Exception as e:
-        print(f"Error retrieving generic data for {user_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка сервера при получении данных: {e}")
+        return JSONResponse(status_code=200, content={"status": "success", "message": "Данные успешно получены!", "data": data})
+    except Exception as e: # Keep this for explicit Firestore error handling if needed, or remove to let global handler take over
+ raise e
 
 # --- API для обработки событий от Eventarc ---
 @app.post("/eventarc-handler")
@@ -453,9 +583,8 @@ async def create_library_book(
             "book": response_book_data
         })
     except Exception as e:
-        print(f"Ошибка при добавлении книги в библиотеку: {e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка сервера при добавлении книги: {e}")
-
+ # Let the global exception handler handle this
+ raise e
 @app.get("/library/books")
 async def get_library_books(
     user_id: str = Depends(get_current_user),
@@ -492,12 +621,12 @@ async def get_library_books(
         # This is a common error for missing indexes
         error_detail = f"Query failed. A required Firestore index is likely missing. Check backend logs for details. Original error: {e}"
         print(error_detail)
-        raise HTTPException(status_code=400, detail=error_detail)
+        # Используем вспомогательную функцию для стандартизированного ответа
+        return generate_error_response(status_code=400, detail=error_detail)
     except Exception as e:
-        print(f"An unexpected error occurred while fetching books: {e}")
-        raise HTTPException(status_code=500, detail=f"An unexpected server error occurred: {e}")
+ # Let the global exception handler handle this
+ raise e
 # --- КОНЕЦ НОВЫХ API ДЛЯ УПРАВЛЕНИЯ КНИГАМИ БИБЛИОТЕКИ ---
-
 
 # --- API для LLM-функций ---
 @app.post("/llm/summarize_text")
@@ -506,10 +635,12 @@ async def summarize_text_with_llm(payload: SummarizeTextRequest, user_id: str = 
     Summarizes the provided text using the Gemini LLM.
     """
     if llm_model is None:
-        raise HTTPException(status_code=500, detail="LLM модель не инициализирована.")
+        # Используем вспомогательную функцию для стандартизированного ответа
+        return generate_error_response(status_code=500, detail="LLM модель не инициализирована.")
     text_to_summarize = payload.text
     if not text_to_summarize:
-        raise HTTPException(status_code=400, detail="Текст для суммирования не предоставлен.")
+        # Используем вспомогательную функцию для стандартизированного ответа
+        return generate_error_response(status_code=400, detail="Текст для суммирования не предоставлен.")
 
     try:
         prompt = f"Пожалуйста, кратко и четко суммируйте следующий текст:\n\n{text_to_summarize}"
@@ -521,15 +652,15 @@ async def summarize_text_with_llm(payload: SummarizeTextRequest, user_id: str = 
             "summary": summarized_text
         })
     except Exception as e:
-        print(f"Ошибка при суммировании текста с помощью LLM: {e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка сервера при суммировании текста: {e}")
-
+ # Let the global exception handler handle this
+ raise e
 
 # --- API для управления профилем пользователя ---
 @app.post("/users/profile")
 async def create_user_profile(profile_data: UserProfileCreate, user_id: str = Depends(get_current_user)):
     if db is None:
-        raise HTTPException(status_code=500, detail="Firestore DB не инициализирован.")
+        # Используем вспомогательную функцию для стандартизированного ответа
+        return generate_error_response(status_code=500, detail="Firestore DB не инициализирован.")
     try:
         user_ref = db.collection('users').document(user_id)
         user_ref.set(profile_data.model_dump())
@@ -540,32 +671,37 @@ async def create_user_profile(profile_data: UserProfileCreate, user_id: str = De
             "profile": profile_data.model_dump()
         })
     except Exception as e:
-        print(f"Error creating/updating user profile for {user_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка сервера при создании/обновлении профиля: {e}")
+ # Let the global exception handler handle this
+ raise e
 
 @app.get("/users/profile")
 async def get_user_profile(user_id: str = Depends(get_current_user)):
     if db is None:
-        raise HTTPException(status_code=500, detail="Firestore DB не инициализирован.")
+        # Используем вспомогательную функцию для стандартизированного ответа
+        return generate_error_response(status_code=500, detail="Firestore DB не инициализирован.")
     try:
         user_ref = db.collection('users').document(user_id)
-        user_doc = user_ref.get()
+        update_data = profile_data.model_dump()
+        update_data = {k: v for k, v in update_data.items() if v is not None}
 
-        if not user_doc.exists:
-            raise HTTPException(status_code=404, detail="Профиль пользователя не найден. Пожалуйста, создайте его.")
+        if not update_data:
+ raise HTTPException(status_code=400, detail="Нет данных для обновления.")
 
-        profile_data = user_doc.to_dict()
-        profile_data = convert_timestamps_to_strings(profile_data)
-        print(f"User {user_id} profile retrieved from Firestore.")
+        user_ref.update(update_data)
+        print(f"User {user_id} profile updated in Firestore: {update_data}")
+
+        updated_doc = user_ref.get()
+        updated_profile = convert_timestamps_to_strings(updated_doc.to_dict())
         return JSONResponse(status_code=200, content={
             "status": "success",
-            "profile": profile_data
+            "message": "Профиль пользователя успешно обновлен",
+            "profile": updated_profile
         })
-    except HTTPException as http_exc:
-        raise http_exc
-    except Exception as e:
-        print(f"Error getting user profile for {user_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка сервера при получении профиля: {e}")
+ except Exception as e:
+ # Let the global exception handler handle this
+        print(f"Error updating user profile for {user_id}: {e}")
+        # Используем вспомогательную функцию для стандартизированного ответа
+        return generate_error_response(status_code=500, detail=f"Ошибка сервера при обновлении профиля: {e}")
 
 @app.put("/users/profile")
 async def update_user_profile(profile_data: UserProfileUpdate, user_id: str = Depends(get_current_user)):
@@ -599,7 +735,8 @@ async def update_user_profile(profile_data: UserProfileUpdate, user_id: str = De
 @app.post("/learning-plans/generate")
 async def generate_learning_plan(plan_request: LearningPlanGenerateRequest, user_id: str = Depends(get_current_user)):
     if llm_model is None:
-        raise HTTPException(status_code=500, detail="LLM модель не инициализирована.")
+        # Используем вспомогательную функцию для стандартизированного ответа
+        return generate_error_response(status_code=500, detail="LLM модель не инициализирована.")
     print(f"User {user_id} requested learning plan generation: {plan_request.model_dump()}")
     
     prompt = f"Сгенерируй детальный обучающий план по предмету '{plan_request.subject}' типа '{plan_request.planType}'. "
@@ -615,9 +752,15 @@ async def generate_learning_plan(plan_request: LearningPlanGenerateRequest, user
         generated_plan_text = response.candidates[0].content.parts[0].text
     except Exception as e:
         print(f"Ошибка при генерации плана с LLM: {e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка при генерации плана: {e}")
+        # Используем вспомогательную функцию для стандартизированного ответа
+        return generate_error_response(status_code=500, detail=f"Ошибка при генерации плана: {e}")
 
     plan_id = "plan_" + os.urandom(8).hex()
+    # Обычно планы сохраняются в БД перед возвратом, но по структуре спецификации
+    # кажется, что тут возвращается только сгенерированный текст.
+    # Добавьте сохранение в Firestore, если это требуется.
+    # plan_ref = db.collection('users').document(user_id).collection('learning_plans').document(plan_id)
+    # plan_ref.set(...)
     return JSONResponse(status_code=200, content={
         "status": "success",
         "message": "План успешно сгенерирован.",
@@ -680,9 +823,8 @@ async def update_learning_plan_progress(planId: str, progress_data: dict, user_i
             "message": "Прогресс успешно обновлен.",
             "updatedProgress": progress_data
         })
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка при обновлении прогресса: {e}")
-
+ except Exception as e:
+ raise HTTPException(status_code=500, detail=f"Ошибка при обновлении прогресса: {e}")
 # --- API для LLM-агента (чата) ---
 @app.post("/agent/chat")
 async def chat_with_agent(chat_message: AgentChatMessage, user_id: str = Depends(get_current_user)):
@@ -712,8 +854,8 @@ async def chat_with_agent(chat_message: AgentChatMessage, user_id: str = Depends
         except HTTPException as e:
             raise e
         except Exception as e:
-            print(f"Ошибка при извлечении RAG-контекста: {e}")
-            raise HTTPException(status_code=500, detail=f"Ошибка при подготовке RAG-запроса: {e}")
+ # Let the global exception handler handle this
+ raise e
     else:
         print("Выполнение общего запроса к LLM.")
 
@@ -721,9 +863,8 @@ async def chat_with_agent(chat_message: AgentChatMessage, user_id: str = Depends
         response = llm_model.generate_content(full_prompt)
         llm_response_text = response.candidates[0].content.parts[0].text
     except Exception as e:
-        print(f"Ошибка при вызове LLM: {e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка при генерации ответа LLM: {e}")
-
+ # Let the global exception handler handle this
+ raise e
     conversation_id = chat_message.conversationId or "conv_" + os.urandom(8).hex()
 
     chat_history_ref = db.collection('users').document(user_id).collection('conversations').document(conversation_id).collection('messages')
@@ -879,9 +1020,8 @@ async def upload_document(
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
-        print(f"Ошибка при загрузке документа для пользователя {user_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка сервера при загрузке документа: {e}")
-
+ # Let the global exception handler handle this
+ raise e
 @app.get("/files/download-url/{fileId}")
 async def get_download_url(fileId: str, user_id: str = Depends(get_current_user)):
     if db is None or storage_client is None or GCS_BUCKET_NAME is None:
@@ -903,9 +1043,8 @@ async def get_download_url(fileId: str, user_id: str = Depends(get_current_user)
             "status": "success",
             "downloadUrl": signed_url
         })
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка при генерации URL для скачивания: {e}")
-
+ except Exception as e:
+ raise HTTPException(status_code=500, detail=f"Ошибка при генерации URL для скачивания: {e}")
 @app.get("/files")
 async def get_user_files(user_id: str = Depends(get_current_user)):
     if db is None:

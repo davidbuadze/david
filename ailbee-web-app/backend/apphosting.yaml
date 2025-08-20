@@ -33,16 +33,16 @@ env: # <--- Correct env syntax
       - BUILD
       - RUNTIME
   - variable: CORS_ALLOWED_ORIGINS # Add this based on your backend code
-    value: "https://ailbee.web.app" # Ensure this is correct
+    value: "https://ailbee.web.app,http://localhost:3000" # Ensure this is correct
     availability:
       - BUILD
       - RUNTIME
   
-  - variable: MESSAGE
-    value: Hello world!
-    availability:
-      - BUILD
-      - RUNTIME
+  # - variable: MESSAGE
+  #   value: Hello world!
+  #   availability:
+  #     - BUILD
+  #     - RUNTIME
 
   # Grant access to secrets in Cloud Secret Manager.
   # See https://firebase.google.com/docs/app-hosting/configure#secret-parameters
