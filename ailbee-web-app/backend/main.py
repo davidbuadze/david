@@ -114,8 +114,10 @@ else:
     origins = [
         "https://ailbee.web.app",
         "https://ailbee.firebaseapp.com",
-        "http://localhost:3000", # Для React/Next.js
-        "http://localhost:8000", # Для локального тестирования бэкенда
+        "http://localhost",
+        "http://localhost:3000",
+        "http://localhost:5000",
+        "http://localhost:8000",
     ]
 
 print(f"CORS настроен для следующих источников: {origins}")

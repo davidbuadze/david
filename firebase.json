@@ -16,6 +16,8 @@
   "functions": [
     {
       "source": "functions",
+      "runtime": "nodejs22",
+      "serviceAccount": "ailbee-functions@ailbee.iam.gserviceaccount.com",
       "codebase": "default",
       "ignore": [
         "node_modules",
@@ -35,7 +37,7 @@
   "apphosting": [
     {
       "backendId": "ailbee-cloud-run-backend",
-      "rootDir": "/home/user/david",
+      "rootDir": "ailbee-web-app/backend",
       "ignore": [
         "node_modules",
         ".git",
@@ -55,7 +57,7 @@
         "firebase-debug.*.log",
         "functions"
       ],
-      "alwaysDeployFromSource": true
+      "alwaysDeployFromSource": false
     }
   ]
 }
