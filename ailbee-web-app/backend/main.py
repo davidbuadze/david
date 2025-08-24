@@ -16,7 +16,7 @@ import logging
 from firebase_admin import credentials, auth, firestore
 from fastapi.middleware.cors import CORSMiddleware
 from google.api_core import exceptions as google_exceptions
-from google.cloud.firestore_v1.base_timestamp import Timestamp as FirestoreTimestamp
+from google.cloud.firestore_v1.base_timestamp import Timestamp
 
 # Google Cloud Libraries for LLM and Storage
 import vertexai
