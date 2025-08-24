@@ -474,7 +474,7 @@ async def retrieve_relevant_context(query: str, document_ids: List[str]) -> str:
 # --- API Endpoints ---
 
 @app.get("/")
-async def read_root():
+async def root():
     print('Received request for /')
     return {"message": "Welcome to FastAPI Backend!"}
 
