@@ -1,0 +1,8 @@
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', 'gcr.io/ailbee/ailbee-cloud-run-backend', '.']
+images:
+- 'gcr.io/ailbee/ailbee-cloud-run-backend'
+options:
+  logging: CLOUD_LOGGING_ONLY
+serviceAccount: 'projects/ailbee/serviceAccounts/991527374957-compute@developer.gserviceaccount.com'

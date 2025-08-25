@@ -470,7 +470,6 @@ async def retrieve_relevant_context(query: str, document_ids: List[str]) -> str:
     MAX_CONTEXT_LENGTH = 7000  # Gemini имеет большое окно контекста
     return full_context[:MAX_CONTEXT_LENGTH]
 
-
 # --- API Endpoints ---
 
 @app.get("/")

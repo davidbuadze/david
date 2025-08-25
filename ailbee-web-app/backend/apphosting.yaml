@@ -1,5 +1,4 @@
 # Settings for Backend (on Cloud Run).
-# See https://firebase.google.com/docs/app-hosting/configure#cloud-run
 runConfig:
   minInstances: 0
   maxInstances: 10
@@ -9,33 +8,6 @@ runConfig:
 
 # Configuration for the build process
 build:
-  # Buildpack configuration.
-  # You can specify a different builder if you need to.
-  # builder: gcr.io/buildpacks/builder:v1
-  # Build arguments
-  # args:
-  #   - "ARG_NAME=ARG_VALUE"
-
-# Environment variables and secrets.
-env:
-  - variable: GCP_PROJECT_ID
-    value: "ailbee"
-    availability:
-      - BUILD
-      - RUNTIME
-  - variable: GCP_LOCATION
-    value: "us-central1"
-    availability:
-      - BUILD
-      - RUNTIME
-  - variable: GCS_BUCKET_NAME
-    value: "firebaseapphosting-sources-991527374957-us-central1"
-    availability:
-      - BUILD
-      - RUNTIME
-  - variable: CORS_ALLOWED_ORIGINS
-    value: "https://ailbee.web.app,http://localhost:3000"
-    availability:
-      - BUILD
-      - RUNTIME
-      
+  docker:
+    context: .
+    
