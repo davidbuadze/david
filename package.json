@@ -1,0 +1,10 @@
+{
+    "name": "ailbee-monorepo",
+    "private": true,
+    "scripts": {
+      "start": "npm --prefix ./ailbee-web-app/frontend start",
+      "build-frontend": "npm --prefix ./ailbee-web-app/frontend run build",
+      "build-functions": "npm --prefix ./functions run build"
+    }
+  }
+  

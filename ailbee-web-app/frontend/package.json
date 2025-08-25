@@ -15,7 +15,7 @@
   },
   "scripts": {
     "start": "react-scripts start",
-    "build": "PUBLIC_URL=https://ailbee.web.app REACT_APP_FIREBASE_API_KEY=AIzaSyC7qmfySJIC15io9iw1_L5iVge7NZT-gGw REACT_APP_BACKEND_URL=https://ailbee-cloud-run-backend-991527374957.us-central1.run.app react-scripts build",
+    "build": "react-scripts build",
     "test": "react-scripts test",
     "eject": "react-scripts eject"
   },
