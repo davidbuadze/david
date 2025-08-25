@@ -9,21 +9,22 @@ runConfig:
 
 # Configuration for the build process
 build:
-  docker:
-    dockerfilePath: Dockerfile # Use the Dockerfile in this directory
-    context: . # Use the current directory (ailbee-web-app/backend) as the build context
+  # Buildpack configuration.
+  # You can specify a different builder if you need to.
+  # builder: gcr.io/buildpacks/builder:v1
+  # Build arguments
+  # args:
+  #   - "ARG_NAME=ARG_VALUE"
 
 # Environment variables and secrets.
-env: # <--- Correct env syntax
-  # Configure environment variables.
-  # See https://firebase.google.com/docs/app-hosting/configure#user-defined-environment
-  - variable: GCP_PROJECT_ID # Add this based on your backend code
+env:
+  - variable: GCP_PROJECT_ID
     value: "ailbee"
     availability:
       - BUILD
       - RUNTIME
-  - variable: GCP_LOCATION # Add this based on your backend code
-    value: "us-central1" # Ensure this matches your desired region
+  - variable: GCP_LOCATION
+    value: "us-central1"
     availability:
       - BUILD
       - RUNTIME
@@ -32,19 +33,9 @@ env: # <--- Correct env syntax
     availability:
       - BUILD
       - RUNTIME
-  - variable: CORS_ALLOWED_ORIGINS # Add this based on your backend code
-    value: "https://ailbee.web.app,http://localhost:3000" # Ensure this is correct
+  - variable: CORS_ALLOWED_ORIGINS
+    value: "https://ailbee.web.app,http://localhost:3000"
     availability:
       - BUILD
       - RUNTIME
-  
-  # - variable: MESSAGE
-  #   value: Hello world!
-  #   availability:
-  #     - BUILD
-  #     - RUNTIME
-
-  # Grant access to secrets in Cloud Secret Manager.
-  # See https://firebase.google.com/docs/app-hosting/configure#secret-parameters
-  # - variable: MY_SECRET
-  #   secret: mySecretRef
+      
