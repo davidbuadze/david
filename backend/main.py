@@ -56,7 +56,7 @@ app = FastAPI(
     version="0.1.0",
 )
 
-db = None
+db = None # Firestore client
 try:
     if not firebase_admin._apps: # Проверяем, не инициализировано ли уже приложение
         firebase_admin.initialize_app(credentials.ApplicationDefault())
@@ -709,8 +709,7 @@ def convert_timestamps_to_strings(data: dict) -> dict:
 @app.post("/library/books")
 async def create_library_book(
     book_data: LibraryBookCreate,
-    user_id: str = Depends(get_current_user)
-):
+    user_id: str = Depends(get_current_user)):
     """
     Добавляет новую книгу в центральную библиотеку.
     """
@@ -745,8 +744,7 @@ async def create_library_book(
 async def get_library_books(
     user_id: str = Depends(get_current_user),
     education_level: Optional[str] = Query(None, description="Фильтр по уровню образования (primary, middle, high, university, professional)"),
-    subject: Optional[str] = Query(None, description="Фильтр по предмету (Математика, Биология, История, Физика, Литература, Химия, Информатика)")
-):
+    subject: Optional[str] = Query(None, description="Фильтр по предмету (Математика, Биология, История, Физика, Литература, Химия, Информатика)")):
     """
     Получает список книг из центральной библиотеки с возможностью фильтрации.
     """
