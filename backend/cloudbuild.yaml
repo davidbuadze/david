@@ -5,4 +5,4 @@ images:
 - 'gcr.io/ailbee/ailbee-cloud-run-backend'
 options:
   logging: CLOUD_LOGGING_ONLY
-serviceAccount: 'projects/ailbee/serviceAccounts/991527374957-compute@developer.gserviceaccount.com'
+serviceAccount: 'projects/ailbee/serviceAccounts/ailbee-cloud-run@ailbee.iam.gserviceaccount.com'

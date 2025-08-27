@@ -2,13 +2,20 @@
   "apphosting": [
     {
       "backendId": "ailbee-cloud-run-backend",
-      "rootDir": "ailbee-web-app/backend",
-      "build": "docker",
-      "ignore": [
-        "node_modules",
-        "venv"
-      ],
+      "rootDir": "backend",
       "alwaysDeployFromSource": true
     }
-  ]
+  ],
+  "hosting": {
+    "public": "frontend/build",
+    "rewrites": [
+      {
+        "source": "/api/**",
+        "run": {
+          "serviceId": "ailbee-cloud-run-backend",
+          "region": "us-central1"
+        }
+      }
+    ]
+  }
 }

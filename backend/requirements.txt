@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pydantic
+python-dotenv
+firebase-admin
+google-cloud-firestore
+google-cloud-storage
+vertexai
+numpy
+pypdf
+python-docx
