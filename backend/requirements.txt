@@ -3,9 +3,9 @@ uvicorn
 pydantic
 python-dotenv
 firebase-admin
-google-cloud-firestore
 google-cloud-storage
+google-cloud-firestore
 vertexai
-numpy
 pypdf
 python-docx
+numpy

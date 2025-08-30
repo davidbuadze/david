@@ -16,7 +16,9 @@ import logging
 from firebase_admin import credentials, auth, firestore
 from fastapi.middleware.cors import CORSMiddleware
 from google.api_core import exceptions as google_exceptions
-from google.cloud.firestore_v1.base_timestamp import Timestamp
+# --- Правильные, публичные импорты для Firestore ---
+from google.cloud.firestore import Timestamp
+from google.cloud.firestore_v1.collection import CollectionReference
 
 # Google Cloud Libraries for LLM and Storage
 import vertexai
@@ -31,14 +33,19 @@ from docx import Document
 # Configure basic logging
 logging.basicConfig(level=logging.INFO)
 
+# --- Имитация векторной базы данных в памяти (для RAG) ---
+# Эти переменные должны быть определены на глобальном уровне
+MOCKED_VECTOR_DB: Dict[str, Dict[str, Any]] = {}
+MOCKED_DOC_CHUNKS_MAP: Dict[str, List[str]] = {}
+
 # --- Глобальные переменные для Firebase и GCP ---
 # Получаем ID проекта и имя бакета из переменных окружения
 # Если они не установлены, это указывает на проблему с развертыванием
 # и приложение не сможет функционировать корректно.
 # Убедитесь, что эти переменные окружения установлены в Cloud Run!
-CP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
+GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 GCP_LOCATION = os.environ.get("GCP_LOCATION", "us-central1")
-GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME")
+GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME") # Общий бакет для документов и т.д.
 GCS_BOOKS_BUCKET = os.environ.get("GCS_BOOKS_BUCKET")
 GCS_USER_DATA_BUCKET = os.environ.get("GCS_USER_DATA_BUCKET")
 GCS_HOSTING_BUCKET = os.environ.get("GCS_HOSTING_BUCKET")
@@ -61,9 +68,9 @@ try:
     if not firebase_admin._apps: # Проверяем, не инициализировано ли уже приложение
         firebase_admin.initialize_app(credentials.ApplicationDefault())
     db = firestore.client()
-    print("Firebase Admin SDK успешно инициализирован.")
+    logging.info("Firebase Admin SDK успешно инициализирован.")
 except Exception as e:
-    print(f"Ошибка инициализации Firebase Admin SDK: {e}")
+    logging.error(f"Ошибка инициализации Firebase Admin SDK: {e}", exc_info=True)
     # Это критическая ошибка, без которой приложение не может работать.
     # Лучше "упасть" сразу с понятным сообщением.
     raise RuntimeError(f"Не удалось инициализировать Firebase Admin SDK: {e}") from e
@@ -74,60 +81,26 @@ embedding_model = None
 try:
     if GCP_PROJECT_ID and GCP_LOCATION:
         vertexai.init(project=GCP_PROJECT_ID, location=GCP_LOCATION)
-        llm_model = GenerativeModel("gemini-2.5-flash-preview-05-20")
+        llm_model = GenerativeModel("gemini-1.5-flash-preview-0514")
         embedding_model = TextEmbeddingModel.from_pretrained("text-embedding-004")
-        print(f"Vertex AI initialized for project {GCP_PROJECT_ID} in {GCP_LOCATION}")
+        logging.info(f"Vertex AI initialized for project {GCP_PROJECT_ID} in {GCP_LOCATION}")
     else:
-        print("Пропуск инициализации Vertex AI: GCP_PROJECT_ID или GCP_LOCATION не установлены.")
+        logging.warning("Пропуск инициализации Vertex AI: GCP_PROJECT_ID или GCP_LOCATION не установлены.")
 except Exception as e:
-    print(f"Предупреждение: Не удалось инициализировать Vertex AI: {e}. Функции LLM будут недоступны.")
+    logging.error(f"Предупреждение: Не удалось инициализировать Vertex AI: {e}. Функции LLM будут недоступны.", exc_info=True)
 
 # --- Инициализация клиента Cloud Storage ---
-storage_client = storage.Client()
-print("Google Cloud Storage успешно инициализирован.")
-storage_client = None
+storage_client: Optional[storage.Client] = None # Используйте type hint для яскости
+
 try:
     if GCP_PROJECT_ID:
         storage_client = storage.Client(project=GCP_PROJECT_ID)
-        print("Cloud Storage Client успешно инициализирован.")
+        logging.info("Cloud Storage Client успешно инициализирован.") # Используйте logging
     else:
-        print("Пропуск инициализации Cloud Storage Client: GCP_PROJECT_ID не установлен.")
+        logging.warning("Пропуск инициализации Cloud Storage Client: GCP_PROJECT_ID не установлен.") # Используйте logging
 except Exception as e:
-    print(f"Предупреждение: Не удалось инициализировать Cloud Storage Client: {e}. Функции хранилища будут недоступны.")
+    logging.error(f"Предупреждение: Не удалось инициализировать Cloud Storage Client: {e}. Функции хранилища будут недоступны.", exc_info=True) # Логируйте ошибку детально
 
-@app.on_event("startup")
-async def startup_event():
-    print("Запуск приложения: Выполнение инициализации коллекций...")
-    await initialize_collections()
-    print("Запуск приложения: Инициализация коллекций завершена.")
-
-# --- Dependency для получения ID пользователя из токена Firebase Auth ---
-async def get_current_user(request: Request):
-    """
-    Проверяет Firebase ID Token из заголовка Authorization.
-    Возвращает UID пользователя.
-    """
-    auth_header = request.headers.get('Authorization')
-    if not auth_header or not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Отсутствует заголовок авторизации")
-
-    token = auth_header.split('Bearer ')[1] if 'Bearer ' in auth_header else None
-    if not token:
-        raise HTTPException(status_code=401, detail="Неверный формат токена")
-
-    try:
-        decoded_token = auth.verify_id_token(token)
-        request.state.user_id = decoded_token['uid']
-        return decoded_token['uid']
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=f"Недействительный токен: {e}")
-
-# --- Настройка CORS Middleware ---
-
-# Лучшая практика: загружать разрешенные источники из переменной окружения.
-# Это позволяет легко изменять их для разных сред (разработка, продакшн)
-# без изменения кода.
-# Пример переменной в Cloud Run: "https://ailbee.web.app,https://ailbee.firebaseapp.com"
 CORS_ALLOWED_ORIGINS = os.environ.get("CORS_ALLOWED_ORIGINS")
 
 if CORS_ALLOWED_ORIGINS:
@@ -136,7 +109,7 @@ else:
     # Фоллбэк на жестко закодированный список для локальной разработки,
     # если переменная окружения не установлена.
     # В продакшене настоятельно рекомендуется использовать переменную окружения.
-    print("Предупреждение: Переменная окружения CORS_ALLOWED_ORIGINS не установлена. Используется список по умолчанию для разработки.")
+    logging.warning("Предупреждение: Переменная окружения CORS_ALLOWED_ORIGINS не установлена. Используется список по умолчанию для разработки.")
     origins = [
         "https://ailbee.web.app",
         "https://ailbee.firebaseapp.com",
@@ -146,15 +119,47 @@ else:
         "http://localhost:8000",
     ]
 
-print(f"CORS настроен для следующих источников: {origins}")
+logging.info(f"CORS настроен для следующих источников: {origins}")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ALLOWED_ORIGINS").split(','),
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- Вспомогательная функция для генерации стандартизированных ответов об ошибках ---\
+def generate_error_response(status_code: int, detail: Any) -> JSONResponse:
+    """
+    Генерирует стандартизированный JSON-ответ об ошибке.
+    """
+    # В detail может быть строка или словарь (из HTTPException)
+    error_message = detail if isinstance(detail, str) else detail.get('detail', 'Произошла неизвестная ошибка.')
+    return JSONResponse(
+        status_code=status_code,
+        content={"status": "error", "message": error_message}
+    )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """
+    Handles FastAPI HTTPExceptions and returns a standardized JSON response.
+    """
+    logging.error(f"HTTP Exception occurred: {exc.status_code} - {exc.detail}")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"status": "error", "message": exc.detail}
+    )
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    """
+    Handles all other exceptions and returns a generic 500 error response.
+    """
+    logging.error(f"An unhandled exception occurred: {exc}", exc_info=True) # Log traceback
+    # Возвращаем стандартизированный ответ об ошибке
+    return generate_error_response(status_code=500, detail="Произошла внутренняя ошибка сервера.")
 
 # --- Модели данных для запросов ---
 
@@ -229,6 +234,36 @@ class LibraryBookCreate(BaseModel):
     subject: str = Field(..., description="Предмет (Математика, Биология, История, Физика, Литература, Химия, Информатика)")
     tags: Optional[List[str]] = None
 
+@app.on_event("startup")
+async def startup_event():
+    logging.info("Запуск приложения: Выполнение инициализации коллекций...")
+    await initialize_collections()
+    logging.info("Запуск приложения: Инициализация коллекций завершена.")
+
+# --- Dependency для получения ID пользователя из токена Firebase Auth ---
+async def get_current_user(request: Request):
+    """
+    Проверяет Firebase ID Token из заголовка Authorization.
+    Возвращает UID пользователя.
+    """
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Отсутствует заголовок авторизации")
+
+    token = auth_header.split('Bearer ')[1] if 'Bearer ' in auth_header else None
+    if not token:
+        raise HTTPException(status_code=401, detail="Неверный формат токена")
+
+    try:
+        # === Вот здесь происходит верификация токена и получение UID ===
+        decoded_token = auth.verify_id_token(token)
+        request.state.user_id = decoded_token['uid'] # Сохраняем UID в состоянии запроса (опционально, но удобно)
+        return decoded_token['uid'] # Возвращаем UID пользователя
+    except Exception as e:
+        # Лучше логировать ошибку, чтобы видеть детали в логах сервера
+        logging.error(f"Ошибка верификации токена: {e}", exc_info=True)
+        raise HTTPException(status_code=401, detail=f"Недействительный токен: {e}")
+
 class SummarizeTextRequest(BaseModel):
     text: str
 
@@ -238,9 +273,8 @@ def convert_timestamps_to_strings(data: Any) -> Any:
     Рекурсивно преобразует объекты Firestore Timestamp и datetime в строки ISO 8601
     внутри словарей и списков.
     """
-    if isinstance(data, FirestoreTimestamp):
-        return data.isoformat()
-    elif isinstance(data, datetime.datetime):
+    # Исправленная проверка типа. Используем импортированный Timestamp.
+    if isinstance(data, (Timestamp, datetime.datetime)):
         return data.isoformat()
     elif isinstance(data, dict):
         return {k: convert_timestamps_to_strings(v) for k, v in data.items()}
@@ -248,26 +282,6 @@ def convert_timestamps_to_strings(data: Any) -> Any:
         return [convert_timestamps_to_strings(elem) for elem in data]
     else:
         return data
-
-# --- Глобальные обработчики исключений ---
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
- """
- Handles FastAPI HTTPExceptions and returns a standardized JSON response.
- """
- logging.error(f"HTTP Exception occurred: {exc.status_code} - {exc.detail}")
- return JSONResponse(
- status_code=exc.status_code,
- content={"status": "error", "message": exc.detail}
- )
-
-@app.exception_handler(Exception)
-async def general_exception_handler(request: Request, exc: Exception):
- """
- Handles all other exceptions and returns a generic 500 error response.
- """
- logging.error(f"An unhandled exception occurred: {exc}", exc_info=True) # Log traceback
- return JSONResponse(status_code=500, content={"status": "error", "message": "Произошла внутренняя ошибка сервера."})
 
 # --- API для загрузки пользовательских данных ---
 class UploadResponse(BaseModel):
@@ -278,17 +292,25 @@ class UploadResponse(BaseModel):
 @app.post("/upload_user_data", response_model=UploadResponse)
 async def upload_user_data(user_data_file: UploadFile = File(...), user_id: str = Depends(get_current_user)):
     """
-    Загружает файл, предоставленный пользователем, в бакет 'ailbee-user-data'.
+    Загружает файл, предоставленный пользователем, в бакет \'ailbee-user-data\'.
     Файл сохраняется в директорию, специфичную для пользователя.
-    """
-    print(f"Получен запрос на загрузку пользовательских данных от {user_id}")
     
+    Args:
+        user_data_file: Файл для загрузки.
+    """
+    logging.info(f"Получен запрос на загрузку пользовательских данных от {user_id}")
+
     try:
+        if storage_client is None:
+            raise HTTPException(status_code=500, detail="Cloud Storage не инициализирован.")
         bucket_name = GCS_USER_DATA_BUCKET or "ailbee-user-data"
         bucket = storage_client.bucket(bucket_name)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Не удалось получить доступ к бакету: {str(e)}")
 
+    if not user_data_file.filename:
+        raise HTTPException(status_code=400, detail="Имя файла не предоставлено.")
+    
     file_extension = user_data_file.filename.split('.')[-1]
     file_path = f"users/{user_id}/{uuid.uuid4()}.{file_extension}"
     blob = bucket.blob(file_path)
@@ -297,8 +319,11 @@ async def upload_user_data(user_data_file: UploadFile = File(...), user_id: str 
         file_bytes = await user_data_file.read()
         await asyncio.to_thread(blob.upload_from_string, file_bytes, content_type=user_data_file.content_type)
         file_url = blob.public_url
-        print(f"Файл '{user_data_file.filename}' успешно загружен в бакет {bucket_name} по пути {file_path}")
-
+        logging.info(f"Файл '{user_data_file.filename}' успешно загружен в бакет {bucket_name} по пути {file_path}")
+        
+        if db is None:
+            raise HTTPException(status_code=500, detail="Firestore DB не инициализирован.")
+        
         user_files_ref = db.collection('users').document(user_id).collection('files')
         await asyncio.to_thread(user_files_ref.add, {
             "file_name": user_data_file.filename,
@@ -306,12 +331,13 @@ async def upload_user_data(user_data_file: UploadFile = File(...), user_id: str 
             "content_type": user_data_file.content_type,
             "uploaded_at": firestore.SERVER_TIMESTAMP
         })
-        print(f"Метаданные файла сохранены в Firestore для пользователя {user_id}")
+        logging.info(f"Метаданные файла сохранены в Firestore для пользователя {user_id}")
 
         return {"status": "success", "message": "Файл успешно загружен.", "file_url": file_url}
 
     except Exception as e:
-        print(f"Ошибка при загрузке пользовательских данных: {e}")
+        logging.error(f"Ошибка при загрузке пользовательских данных: {e}", exc_info=True)
+        # Используем HTTPException для обработки глобальным обработчиком
         raise HTTPException(status_code=500, detail=f"Произошла ошибка при загрузке файла: {str(e)}")
 
 # --- API для загрузки изображения профиля ---
@@ -323,12 +349,20 @@ async def upload_profile_picture(
     """
     Загружает изображение профиля в бакет 'ailbee-user-data'
     и сохраняет ссылку на него в Firestore.
+    
+    Args:
+    profile_picture: Файл изображения профиля.
     """
-    print(f"Получен запрос на загрузку изображения профиля от пользователя: {user_id}")
+    logging.info(f"Получен запрос на загрузку изображения профиля от пользователя: {user_id}")
 
     try:
+        if storage_client is None:
+            raise HTTPException(status_code=500, detail="Cloud Storage не инициализирован.")
         bucket_name = GCS_USER_DATA_BUCKET or "ailbee-user-data"
         bucket = storage_client.bucket(bucket_name)
+        
+        if not profile_picture.filename:
+            raise HTTPException(status_code=400, detail="Имя файла не предоставлено.")
         
         file_extension = profile_picture.filename.split('.')[-1]
         file_path = f"profiles/{user_id}.{file_extension}"
@@ -338,50 +372,72 @@ async def upload_profile_picture(
         await asyncio.to_thread(blob.upload_from_string, file_bytes, content_type=profile_picture.content_type)
         
         file_url = blob.public_url
-        print(f"Изображение профиля успешно загружено по пути: {file_path}")
+        logging.info(f"Изображение профиля успешно загружено по пути: {file_path}")
 
+        if db is None:
+            raise HTTPException(status_code=500, detail="Firestore DB не инициализирован.")
+        
         user_doc_ref = db.collection('users').document(user_id)
         await asyncio.to_thread(user_doc_ref.set, {"profile_picture_url": file_url}, merge=True)
-        print(f"Ссылка на изображение профиля успешно сохранена в Firestore для пользователя {user_id}")
+        logging.info(f"Ссылка на изображение профиля успешно сохранена в Firestore для пользователя {user_id}")
 
         return {"status": "success", "message": "Изображение профиля успешно загружено.", "file_url": file_url}
 
-    except HTTPException as e:
-        raise e
+    except HTTPException as http_exc:
+        raise http_exc # Перебрасываем HTTPException
     except Exception as e:
-        print(f"Ошибка при загрузке изображения профиля: {e}")
+        logging.error(f"Ошибка при загрузке изображения профиля: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Произошла ошибка при загрузке файла.")
 
-# --- Вспомогательная функция для генерации стандартизированных ответов об ошибках ---
-def generate_error_response(status_code: int, detail: Any) -> JSONResponse:
+# --- API для получения информации об экспортах пользователя ---
+@app.get("/users/me/export_logs")
+async def get_user_export_logs(user_id: str = Depends(get_current_user)):
     """
-    Генерирует стандартизированный JSON-ответ об ошибке.
+    Получает логи экспорта данных для текущего аутентифицированного пользователя.
     """
-    # В detail может быть строка или словарь (из HTTPException)
-    error_message = detail if isinstance(detail, str) else detail.get('detail', 'Произошла неизвестная ошибка.')
-    return JSONResponse(
-        status_code=status_code,
-        content={"status": "error", "message": error_message}
-    )
+    if db is None:
+        raise HTTPException(status_code=500, detail="Firestore DB не инициализирован.")
+    try:
+        # Ищем документы в коллекции export_logs, связанные с этим пользователем
+        # Используем поле 'userId', которое мы добавляем в Cloud Function processExportedUserData
+        export_logs_ref = db.collection('export_logs').where('userId', '==', user_id).order_by('timestamp', direction=firestore.Query.DESCENDING)
+        
+        docs = await asyncio.to_thread(export_logs_ref.stream)
+        
+        export_list = []
+        # Используем вспомогательную функцию convert_timestamps_to_strings
+        for doc in docs:
+            export_list.append(convert_timestamps_to_strings(doc.to_dict() or {}))
 
-    # --- Инициализация коллекций с начальными данными ---
+        logging.info(f"Получены логи экспорта для пользователя {user_id}: {len(export_list)} записей.")
+
+        return JSONResponse(status_code=200, content={
+            "status": "success",
+            "message": "Логи экспорта успешно получены",
+            "export_logs": export_list
+        })
+    except Exception as e:
+        logging.error(f"Ошибка при получении логов экспорта для {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка сервера при получении логов экспорта.")
+
+# --- Инициализация коллекций с начальными данными ---
 async def initialize_collections():
     """
     Инициализирует коллекции subjects и educationLevels, если они пусты.
     Эта функция выполняется при запуске приложения.
     """
     if db is None:
-        print("Пропуск инициализации коллекций: Firestore DB не инициализирован.")
+        logging.warning("Пропуск инициализации коллекций: Firestore DB не инициализирован.")
         return
-
-    subjects_ref = db.collection('subjects')
-    education_levels_ref = db.collection('educationLevels')
+    # Используем Type Hint для ясности
+    subjects_ref: CollectionReference = db.collection('subjects')
+    education_levels_ref: CollectionReference = db.collection('educationLevels')
 
     try:
         # Проверяем, пуста ли коллекция subjects
         subjects_docs = await asyncio.to_thread(subjects_ref.limit(1).get)
         if not subjects_docs: # Проверяем, пустой ли список документов
-            print("Инициализация коллекции 'subjects'...")
+            logging.info("Инициализация коллекции 'subjects'...")
             subjects_data = [
                 {"id": "Математика", "name": "Математика"},
                 {"id": "Биология", "name": "Биология"},
@@ -397,14 +453,14 @@ async def initialize_collections():
                 doc_ref = subjects_ref.document(subject["id"])
                 batch.set(doc_ref, subject)
             await asyncio.to_thread(batch.commit)
-            print("Коллекция 'subjects' успешно инициализирована.")
+            logging.info("Коллекция 'subjects' успешно инициализирована.")
         else:
-            print("Коллекция 'subjects' уже содержит данные. Пропуск инициализации.")
+            logging.info("Коллекция 'subjects' уже содержит данные. Пропуск инициализации.")
 
         # Проверяем, пуста ли коллекция educationLevels
         education_levels_docs = await asyncio.to_thread(education_levels_ref.limit(1).get)
         if not education_levels_docs: # Проверяем, пустой ли список документов
-            print("Инициализация коллекции 'educationLevels'...")
+            logging.info("Инициализация коллекции 'educationLevels'...")
             education_levels_data = [
                 {"id": "primary", "name": "Начальные классы"},
                 {"id": "middle", "name": "Средняя школа"},
@@ -417,19 +473,27 @@ async def initialize_collections():
                 doc_ref = education_levels_ref.document(level["id"])
                 batch.set(doc_ref, level)
             await asyncio.to_thread(batch.commit)
-            print("Коллекция 'educationLevels' успешно инициализирована.")
+            logging.info("Коллекция 'educationLevels' успешно инициализирована.")
         else:
-            print("Коллекция 'educationLevels' уже содержит данные. Пропуск инициализации.")
+            logging.info("Коллекция 'educationLevels' уже содержит данные. Пропуск инициализации.")
 
     except Exception as e:
-        print(f"Ошибка при инициализации коллекций: {e}")
+        logging.error(f"Ошибка при инициализации коллекций: {e}", exc_info=True)
 
 @app.post("/upload_book")
 async def upload_book(book_file: UploadFile = File(...), user_id: str = Depends(get_current_user)):
     try:
+        if storage_client is None:
+             raise HTTPException(status_code=500, detail="Cloud Storage не инициализирован.")
+        if db is None:
+             raise HTTPException(status_code=500, detail="Firestore DB не инициализирован.")
+
         # 1. Выбираем бакет для книг
-        bucket_name = "ailbee-books"
+        bucket_name = GCS_BOOKS_BUCKET or "ailbee-books"
         bucket = storage_client.bucket(bucket_name)
+
+        if not book_file.filename:
+            raise HTTPException(status_code=400, detail="Имя файла не предоставлено.")
 
         # 2. Создаем уникальное имя файла
         file_extension = book_file.filename.split('.')[-1]
@@ -442,11 +506,11 @@ async def upload_book(book_file: UploadFile = File(...), user_id: str = Depends(
 
         # 4. Получаем URL загруженного файла
         file_url = blob.public_url
-        print(f"Файл успешно загружен в бакет {bucket_name}.")
+        logging.info(f"Файл успешно загружен в бакет {bucket_name}.")
 
         # 5. Сохраняем ссылку на файл в коллекции Firestore
         books_collection_ref = db.collection('users').document(user_id).collection('books')
-        book_doc_ref = await asyncio.to_thread(books_collection_ref.add, {
+        update_time, book_doc_ref = await asyncio.to_thread(books_collection_ref.add, {
             "title": book_file.filename,
             "storage_url": file_url,
             "uploaded_at": firestore.SERVER_TIMESTAMP,
@@ -456,42 +520,12 @@ async def upload_book(book_file: UploadFile = File(...), user_id: str = Depends(
         return JSONResponse(status_code=200, content={
             "status": "success",
             "message": "Книга успешно загружена и добавлена в Firestore.",
-            "book_id": book_doc_ref[1].id
+            "book_id": book_doc_ref.id
         })
 
     except Exception as e:
-        print(f"Ошибка загрузки книги: {e}")
-        return JSONResponse(status_code=500, content={
-            "status": "error",
-            "message": f"Произошла ошибка при загрузке книги: {e}"
-        })
-
-# --- Имитация векторной базы данных в памяти ---
-MOCKED_VECTOR_DB: Dict[str, Dict[str, Any]] = {}
-MOCKED_DOC_CHUNKS_MAP: Dict[str, List[str]] = {}
-
-# --- Зависимость для проверки Firebase ID Token ---
-async def get_current_user(request: Request):
-    """
-    Проверяет Firebase ID Token из заголовка Authorization.
-    Возвращает UID пользователя.
-    """
-    auth_header = request.headers.get('Authorization')
-    if not auth_header:
-        raise HTTPException(status_code=401, detail="Отсутствует заголовок авторизации")
-
-    token = auth_header.split('Bearer ')[1] if 'Bearer ' in auth_header else None
-    if not token:
-        raise HTTPException(status_code=401, detail="Неверный формат токена")
-
-    try:
-        decoded_token = auth.verify_id_token(token)
-        request.state.user_id = decoded_token['uid']
-        return decoded_token['uid']
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=f"Недействительный токен: {e}")
-
-# --- Вспомогательные функции для RAG ---
+        logging.error(f"Ошибка загрузки книги: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Произошла ошибка при загрузке книги.")
 
 async def extract_text_from_file(file_content: bytes, filename: str) -> str:
     """
@@ -507,10 +541,11 @@ async def extract_text_from_file(file_content: bytes, filename: str) -> str:
             text = "\n".join([para.text for para in doc.paragraphs])
             return text
         else:
+            # Для других типов файлов пытаемся декодировать как текст
             return file_content.decode('utf-8', errors='ignore')
     except Exception as e:
-        print(f"Ошибка при извлечении текста из файла {filename}: {e}")
-        raise HTTPException(status_code=422, detail=f"Не удалось извлечь текст из файла: {e}")
+        logging.error(f"Ошибка при извлечении текста из файла {filename}: {e}", exc_info=True)
+        raise HTTPException(status_code=422, detail="Не удалось извлечь текст из файла.")
 
 async def generate_embedding_for_text(text: str) -> List[float]:
     """
@@ -519,11 +554,12 @@ async def generate_embedding_for_text(text: str) -> List[float]:
     if not embedding_model:
         raise HTTPException(status_code=500, detail="Модель эмбеддингов не инициализирована.")
     try:
-        embeddings = embedding_model.embed(text).values
-        return embeddings[0]
+        # Исправлено: .embed() возвращает список эмбеддингов, нужно взять первый элемент.
+        embeddings = embedding_model.embed([text])
+        return embeddings[0].values
     except Exception as e:
-        print(f"Ошибка при генерации эмбеддингов: {e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка при генерации эмбеддингов: {e}")
+        logging.error(f"Ошибка при генерации эмбеддингов: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Ошибка при генерации эмбеддингов.")
 
 async def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 100) -> List[str]:
     """
@@ -532,15 +568,14 @@ async def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 100) -> L
     chunks = []
     if not text:
         return chunks
-    for i in range(0, len(text), chunk_size - overlap):
-        chunk = text[i:i + chunk_size]
-        chunks.append(chunk)
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunks.append(text[start:end])
+        start += chunk_size - overlap
     return chunks
 
 async def store_document_chunks_in_vector_db(doc_id: str, text_chunks: List[str]):
-    """
-    Сохраняет фрагменты текста и их эмбеддинги в имитированной векторной БД.
-    """
     chunk_ids = []
     for i, chunk in enumerate(text_chunks):
         chunk_id = f"{doc_id}_chunk_{i}"
@@ -548,7 +583,7 @@ async def store_document_chunks_in_vector_db(doc_id: str, text_chunks: List[str]
         MOCKED_VECTOR_DB[chunk_id] = {"text": chunk, "embedding": embedding}
         chunk_ids.append(chunk_id)
     MOCKED_DOC_CHUNKS_MAP[doc_id] = chunk_ids
-    print(f"Документ {doc_id} и его фрагменты сохранены в имитированной векторной БД.")
+    logging.info(f"Документ {doc_id} и его фрагменты сохранены в имитированной векторной БД.")
 
 async def retrieve_relevant_context(query: str, document_ids: List[str]) -> str:
     """
@@ -556,7 +591,7 @@ async def retrieve_relevant_context(query: str, document_ids: List[str]) -> str:
     используя косинусное сходство.
     """
     top_k = 5
-    print(f"Извлечение {top_k} наиболее релевантных фрагментов для запроса: '{query}' из документов: {document_ids}")
+    logging.info(f"Извлечение {top_k} наиболее релевантных фрагментов для запроса: '{query}' из документов: {document_ids}")
 
     if not document_ids:
         return "Документы для поиска не указаны."
@@ -564,10 +599,10 @@ async def retrieve_relevant_context(query: str, document_ids: List[str]) -> str:
     try:
         query_embedding = np.array(await generate_embedding_for_text(query))
     except HTTPException as e:
-        raise e # Перебрасываем HTTPException из generate_embedding_for_text
+        raise e
     except Exception as e:
-        print(f"Ошибка при генерации эмбеддинга для запроса: {e}")
-        raise HTTPException(status_code=500, detail=f"Не удалось сгенерировать эмбеддинг для запроса: {e}")
+        logging.error(f"Ошибка при генерации эмбеддинга для запроса: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Не удалось сгенерировать эмбеддинг для запроса.")
 
     candidate_chunks = []
     for doc_id in document_ids:
@@ -583,12 +618,9 @@ async def retrieve_relevant_context(query: str, document_ids: List[str]) -> str:
     if not candidate_chunks:
         return "Не удалось найти фрагменты текста в указанных документах."
 
-    # Вычисление косинусного сходства.
-    # Эмбеддинги Vertex AI нормализованы, поэтому достаточно скалярного произведения.
     for chunk in candidate_chunks:
-        chunk['similarity'] = np.dot(query_embedding, chunk['embedding']) # type: ignore
+        chunk['similarity'] = np.dot(query_embedding, chunk['embedding'])
 
-    # Сортировка по сходству и выбор top_k
     sorted_chunks = sorted(candidate_chunks, key=lambda x: x['similarity'], reverse=True)
     top_chunks = sorted_chunks[:top_k]
 
@@ -597,115 +629,83 @@ async def retrieve_relevant_context(query: str, document_ids: List[str]) -> str:
 
     context_texts = [chunk['text'] for chunk in top_chunks]
     full_context = "\n\n---\n\n".join(context_texts)
-    MAX_CONTEXT_LENGTH = 7000  # Gemini имеет большое окно контекста
+    MAX_CONTEXT_LENGTH = 7000
     return full_context[:MAX_CONTEXT_LENGTH]
 
 # --- API Endpoints ---
 
 @app.get("/")
 async def root():
-    print('Received request for /')
-    return {"message": "Welcome to FastAPI Backend!"}
+    logging.info('Received request for /')
+    return {"message": "Welcome to FastAPI Backend! Service is running."}
 
 @app.get("/test")
 async def test_endpoint():
-    print('Received request for /test')
+    logging.info('Received request for /test')
     if db is None:
-        return {"message": "Firestore DB failed to initialize!"}
+        raise HTTPException(status_code=500, detail="Firestore DB failed to initialize!")
     return {"message": "Hello from Cloud Run! Firestore DB is connected."}
-
-@app.options("/{path:path}")
-async def options_handler(path: str):
-    return Response(status_code=200)
 
 @app.post("/save_data")
 async def save_generic_data(payload: FrontendSaveDataPayload, user_id: str = Depends(get_current_user)):
     if db is None:
-        return {"status": "error", "message": "Firestore DB not initialized."}
+        raise HTTPException(status_code=500, detail="Firestore DB not initialized.")
     data_to_save = payload.data
     data_to_save["timestamp"] = firestore.SERVER_TIMESTAMP
 
     try:
         doc_ref = db.collection('users').document(user_id).collection('generic_data').document('my_data')
         await asyncio.to_thread(doc_ref.set, data_to_save)
-        print(f"Generic data saved for user {user_id} in Firestore...")
+        logging.info(f"Generic data saved for user {user_id} in Firestore.")
         return {"status": "success", "message": "Данные успешно сохранены!", "saved_data": data_to_save}
     except Exception as e:
-        print(f"Error saving data to Firestore for user {user_id}: {e}")
-        return {"status": "error", "message": f"Произошла ошибка: {str(e)}"}
+        logging.error(f"Error saving data to Firestore for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Произошла ошибка при сохранении данных.")
 
 @app.get("/get_data")
 async def get_generic_data(user_id: str = Depends(get_current_user)):
     if db is None:
-        return {"status": "error", "message": "Firestore DB not initialized."}
+        raise HTTPException(status_code=500, detail="Firestore DB not initialized.")
     try:
         doc_ref = db.collection('users').document(user_id).collection('generic_data').document('my_data')
-        doc = doc_ref.get()
+        doc = await asyncio.to_thread(doc_ref.get)
 
         if not doc.exists:
-            print(f"No generic data found for user {user_id}.")
+            logging.info(f"No generic data found for user {user_id}.")
             return {"status": "success", "message": "Данные не найдены.", "data": None}
 
         data = doc.to_dict()
         data = convert_timestamps_to_strings(data)
-        print(f"Generic data retrieved for user {user_id} from Firestore...")
+        logging.info(f"Generic data retrieved for user {user_id} from Firestore.")
         return {"status": "success", "message": "Данные успешно получены!", "data": data}
     except Exception as e:
-        print(f"Error retrieving data from Firestore for user {user_id}: {e}")
-        return {"status": "error", "message": f"Произошла ошибка: {str(e)}"}
+        logging.error(f"Error retrieving data from Firestore for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Произошла ошибка при получении данных.")
 
 # --- API для обработки событий от Eventarc ---
 @app.post("/eventarc-handler")
 async def handle_eventarc_event(request: Request):
     """
     Обрабатывает входящие события CloudEvents от Eventarc.
-    Этот эндпоинт должен быть защищен, и вызывать его должен только Eventarc.
     """
-    # CloudEvents отправляются как POST-запросы с телом в формате JSON.
-    # Заголовки содержат метаданные события.
     event_type = request.headers.get("ce-type")
     subject = request.headers.get("ce-subject")
     
-    print(f"Получено событие Eventarc типа '{event_type}' для субъекта '{subject}'")
+    logging.info(f"Получено событие Eventarc типа '{event_type}' для субъекта '{subject}'")
 
-    # Полезная нагрузка события находится в теле запроса
-    body = await request.json()
-    
-    # --- Добавьте вашу логику здесь ---
-    # Пример для события загрузки файла в Cloud Storage
+    try:
+        body = await request.json()
+    except Exception as e:
+        logging.error(f"Ошибка парсинга тела запроса Eventarc: {e}", exc_info=True)
+        raise HTTPException(status_code=400, detail="Некорректный формат тела запроса (ожидается JSON).")
+
     if event_type == "google.cloud.storage.object.v1.finalized":
         bucket = body.get("bucket")
         file_name = body.get("name")
-        print(f"Новый файл '{file_name}' был загружен в бакет '{bucket}'.")
-        # Здесь можно запустить обработку файла, например, индексацию для RAG.
+        logging.info(f"Новый файл '{file_name}' был загружен в бакет '{bucket}'.")
 
-    # Подтвердите получение события, вернув успешный статус-код (2xx).
-    return Response(status_code=204) # 204 No Content - хороший выбор, так как ответ не нужен.
+    return Response(status_code=204)
 
-# --- API для получения списка книг ---
-class LibraryBookCreate(BaseModel):
-    title: str
-    author: str
-    subject: str
-    education_level: str
-    file_url: str
-    description: Optional[str] = None
-    
-# --- Вспомогательная функция для конвертации Timestamp в строку ---
-# Примечание: Эта функция не была предоставлена, но необходима для корректной работы.
-# Вам нужно будет реализовать ее, чтобы она соответствовала вашим требованиям.
-def convert_timestamps_to_strings(data: dict) -> dict:
-    """
-    Рекурсивно конвертирует объекты Timestamp в строки ISO 8601.
-    """
-    for key, value in data.items():
-        if isinstance(value, Timestamp):
-            data[key] = value.isoformat()
-        elif isinstance(value, dict):
-            data[key] = convert_timestamps_to_strings(value)
-    return data
-
-# --- API для управления книгами библиотеки ---
 @app.post("/library/books")
 async def create_library_book(
     book_data: LibraryBookCreate,
@@ -725,7 +725,7 @@ async def create_library_book(
 
         update_time, doc_ref = await asyncio.to_thread(db.collection('libraryBooks').add, book_to_firestore)
         book_id = doc_ref.id
-        print(f"Книга '{book_data.title}' (ID: {book_id}) добавлена в библиотеку.")
+        logging.info(f"Книга '{book_data.title}' (ID: {book_id}) добавлена в библиотеку.")
 
         response_book_data = book_dict.copy()
         response_book_data["bookId"] = book_id
@@ -737,23 +737,23 @@ async def create_library_book(
             "book": response_book_data
         })
     except Exception as e:
-        print(f"Ошибка при добавлении книги: {e}")
+        logging.error(f"Ошибка при добавлении книги: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Произошла ошибка при добавлении книги в библиотеку.")
 
 @app.get("/library/books")
 async def get_library_books(
     user_id: str = Depends(get_current_user),
-    education_level: Optional[str] = Query(None, description="Фильтр по уровню образования (primary, middle, high, university, professional)"),
-    subject: Optional[str] = Query(None, description="Фильтр по предмету (Математика, Биология, История, Физика, Литература, Химия, Информатика)")):
+    education_level: Optional[str] = Query(None, description="Фильтр по уровню образования"),
+    subject: Optional[str] = Query(None, description="Фильтр по предмету")):
     """
     Получает список книг из центральной библиотеки с возможностью фильтрации.
     """
     if db is None:
         raise HTTPException(status_code=500, detail="Firestore DB не инициализирован.")
     try:
-        print(f"Пользователь {user_id} запросил список книг из библиотеки. Фильтры: уровень={education_level}, предмет={subject}")
+        logging.info(f"Пользователь {user_id} запросил список книг из библиотеки. Фильтры: уровень={education_level}, предмет={subject}")
 
-        query = db.collection('libraryBooks')
+        query: CollectionReference = db.collection('libraryBooks')
 
         if education_level:
             query = query.where('education_level', '==', education_level)
@@ -761,11 +761,11 @@ async def get_library_books(
             query = query.where('subject', '==', subject)
 
         books = []
-        # Используем to_thread для выполнения блокирующего вызова
         for doc in await asyncio.to_thread(query.stream):
             book_data = doc.to_dict()
-            book_data['bookId'] = doc.id
-            books.append(convert_timestamps_to_strings(book_data))
+            if book_data:
+                book_data['bookId'] = doc.id
+                books.append(convert_timestamps_to_strings(book_data))
 
         return JSONResponse(status_code=200, content={
             "status": "success",
@@ -773,13 +773,11 @@ async def get_library_books(
             "books": books
         })
     except google_exceptions.FailedPrecondition as e:
-        # Эта ошибка часто возникает при отсутствии необходимых индексов в Firestore
         error_detail = f"Query failed. A required Firestore index is likely missing. Check backend logs for details. Original error: {e}"
-        print(error_detail)
+        logging.error(error_detail, exc_info=True)
         raise HTTPException(status_code=400, detail=error_detail)
     except Exception as e:
-        print(f"Ошибка при получении списка книг: {e}")
-        # Возвращаем общую ошибку, чтобы не раскрывать детали реализации
+        logging.error(f"Ошибка при получении списка книг: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Произошла ошибка при получении списка книг.")
 
 # --- API для LLM-функций ---
@@ -796,18 +794,16 @@ async def summarize_text_with_llm(payload: SummarizeTextRequest, user_id: str = 
 
     try:
         prompt = f"Пожалуйста, кратко и четко суммируйте следующий текст:\n\n{payload.text}"
-        # Вызов блокирующей функции в отдельном потоке
         response = await asyncio.to_thread(llm_model.generate_content, prompt)
         summarized_text = response.candidates[0].content.parts[0].text
         
-        print(f"Текст успешно суммирован для пользователя {user_id}.")
+        logging.info(f"Текст успешно суммирован для пользователя {user_id}.")
         return JSONResponse(status_code=200, content={
             "status": "success",
             "summary": summarized_text
         })
     except Exception as e:
-        print(f"Ошибка при суммировании текста: {e}")
-        # Перебрасываем исключение, чтобы его обработал FastAPI
+        logging.error(f"Ошибка при суммировании текста: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Произошла ошибка при суммировании текста.")
 
 # --- API для управления профилем пользователя ---
@@ -820,17 +816,16 @@ async def create_user_profile(profile_data: UserProfileCreate, user_id: str = De
         raise HTTPException(status_code=500, detail="Firestore DB не инициализирован.")
     try:
         user_ref = db.collection('users').document(user_id)
-        # Использование set с merge=True для создания/обновления
         await asyncio.to_thread(user_ref.set, profile_data.model_dump(), merge=True)
-        print(f"User {user_id} profile created/updated in Firestore.")
+        logging.info(f"User {user_id} profile created/updated in Firestore.")
         return JSONResponse(status_code=201, content={
             "status": "success",
             "message": "Профиль пользователя успешно создан/обновлен",
             "profile": profile_data.model_dump()
         })
     except Exception as e:
-        print(f"Ошибка при создании/обновлении профиля для {user_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка сервера при создании/обновлении профиля: {e}")
+        logging.error(f"Ошибка при создании/обновлении профиля для {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Ошибка сервера при создании/обновлении профиля.")
 
 @app.get("/users/profile")
 async def get_user_profile(user_id: str = Depends(get_current_user)):
@@ -841,7 +836,6 @@ async def get_user_profile(user_id: str = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="Firestore DB не инициализирован.")
     try:
         user_ref = db.collection('users').document(user_id)
-        # Получаем документ
         doc = await asyncio.to_thread(user_ref.get)
         
         if not doc.exists:
@@ -856,7 +850,7 @@ async def get_user_profile(user_id: str = Depends(get_current_user)):
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
-        print(f"Ошибка при получении профиля для {user_id}: {e}")
+        logging.error(f"Ошибка при получении профиля для {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Ошибка сервера при получении профиля.")
 
 @app.put("/users/profile")
@@ -867,39 +861,34 @@ async def update_user_profile(profile_data: UserProfileUpdate, user_id: str = De
     if db is None:
         raise HTTPException(status_code=500, detail="Firestore DB не инициализирован.")
     try:
-        # Проверяем, есть ли хотя бы одно поле для обновления
         update_data = profile_data.model_dump(exclude_unset=True)
 
         if not update_data:
             raise HTTPException(status_code=400, detail="Нет данных для обновления.")
         
         user_ref = db.collection('users').document(user_id)
-        # Обновляем документ
         await asyncio.to_thread(user_ref.update, update_data)
-        print(f"User {user_id} profile updated in Firestore.")
+        logging.info(f"User {user_id} profile updated in Firestore.")
         
-        # Получаем обновленный документ для ответа
         updated_doc = await asyncio.to_thread(user_ref.get)
         updated_profile = convert_timestamps_to_strings(updated_doc.to_dict())
 
         return JSONResponse(status_code=200, content={
             "status": "success",
             "message": "Профиль пользователя успешно обновлен",
-            "profile": updated_profile
+            "profile": updated_profile # type: ignore
         })
     except google_exceptions.NotFound:
         raise HTTPException(status_code=404, detail="Профиль пользователя не найден.")
     except Exception as e:
-        print(f"Ошибка при обновлении профиля для {user_id}: {e}")
+        logging.error(f"Ошибка при обновлении профиля для {user_id}: {e}", exc_info=True) # Изменено на logging.error с exc_info
         raise HTTPException(status_code=500, detail="Ошибка сервера при обновлении профиля.")
 
-# --- API для обучающих планов (из спецификации) ---
 @app.post("/learning-plans/generate")
 async def generate_learning_plan(plan_request: LearningPlanGenerateRequest, user_id: str = Depends(get_current_user)):
     if llm_model is None:
-        # Используем вспомогательную функцию для стандартизированного ответа
-        return generate_error_response(status_code=500, detail="LLM модель не инициализирована.")
-    print(f"User {user_id} requested learning plan generation: {plan_request.model_dump()}")
+        raise HTTPException(status_code=500, detail="LLM модель не инициализирована.")
+    logging.info(f"User {user_id} requested learning plan generation: {plan_request.model_dump()}")
     
     prompt = f"Сгенерируй детальный обучающий план по предмету '{plan_request.subject}' типа '{plan_request.planType}'. "
     if plan_request.targetGoal:
@@ -910,12 +899,11 @@ async def generate_learning_plan(plan_request: LearningPlanGenerateRequest, user
         prompt += f"Предпочтения пользователя: {plan_request.userPreferences}. "
     
     try:
-        response = llm_model.generate_content(prompt)
-        generated_plan_text = response.candidates[0].content.parts[0].text
+        response = await asyncio.to_thread(llm_model.generate_content, prompt) # Используем asyncio.to_thread
+        generated_plan_text = response.candidates[0].content.parts[0].text # type: ignore
     except Exception as e:
-        print(f"Ошибка при генерации плана с LLM: {e}")
-        # Используем вспомогательную функцию для стандартизированного ответа
-        return generate_error_response(status_code=500, detail=f"Ошибка при генерации плана: {e}")
+        logging.error(f"Ошибка при генерации плана с LLM: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при генерации плана.") # Более общее сообщение для пользователя
 
     plan_id = "plan_" + os.urandom(8).hex()
     # Обычно планы сохраняются в БД перед возвратом, но по структуре спецификации
@@ -931,9 +919,9 @@ async def generate_learning_plan(plan_request: LearningPlanGenerateRequest, user
             "subject": plan_request.subject,
             "title": f"Обучающий план по {plan_request.subject}",
             "description": generated_plan_text,
-            "createdAt": firestore.SERVER_TIMESTAMP,
+            "createdAt": firestore.SERVER_TIMESTAMP, # Consider converting to string here
             "status": "generated",
-            "sections": []
+            "sections": [] # This might need actual sections generated by LLM or further processing
         }
     })
 
@@ -941,7 +929,7 @@ async def generate_learning_plan(plan_request: LearningPlanGenerateRequest, user
 async def get_user_learning_plans(user_id: str = Depends(get_current_user)):
     if db is None:
         raise HTTPException(status_code=500, detail="Firestore DB не инициализирован.")
-    print(f"User {user_id} requested list of learning plans.")
+    logging.info(f"User {user_id} requested list of learning plans.")
     plans_ref = db.collection('users').document(user_id).collection('learning_plans')
     plans = []
     for doc in plans_ref.stream():
@@ -955,9 +943,10 @@ async def get_user_learning_plans(user_id: str = Depends(get_current_user)):
 
 @app.get("/learning-plans/{planId}")
 async def get_learning_plan_details(planId: str, user_id: str = Depends(get_current_user)):
+    # Перебрасываем HTTPException при ошибках Firebase/Firestore
     if db is None:
         raise HTTPException(status_code=500, detail="Firestore DB не инициализирован.")
-    print(f"User {user_id} requested details for plan {planId}.")
+    logging.info(f"User {user_id} requested details for plan {planId}.")
     plan_ref = db.collection('users').document(user_id).collection('learning_plans').document(planId)
     plan_doc = plan_ref.get()
 
@@ -976,101 +965,118 @@ async def get_learning_plan_details(planId: str, user_id: str = Depends(get_curr
 async def update_learning_plan_progress(planId: str, progress_data: dict, user_id: str = Depends(get_current_user)):
     if db is None:
         raise HTTPException(status_code=500, detail="Firestore DB не инициализирован.")
-    print(f"User {user_id} updated progress for plan {planId}: {progress_data}")
+    logging.info(f"User {user_id} updated progress for plan {planId}: {progress_data}")
     plan_ref = db.collection('users').document(user_id).collection('learning_plans').document(planId)
     try:
-        plan_ref.update(progress_data)
+        # Проверяем, существует ли план перед обновлением (опционально, но хорошая практика)
+        plan_doc = await asyncio.to_thread(plan_ref.get)
+        if not plan_doc.exists:
+             raise HTTPException(status_code=404, detail="Обучающий план не найден.")
+
+        await asyncio.to_thread(plan_ref.update, progress_data)
         return JSONResponse(status_code=200, content={
             "status": "success",
             "message": "Прогресс успешно обновлен.",
             "updatedProgress": progress_data
         })
- except Exception as e:
- raise HTTPException(status_code=500, detail=f"Ошибка при обновлении прогресса: {e}")
-# --- API для LLM-агента (чата) ---
+    except google_exceptions.NotFound: # Ловим специфическую ошибку Firestore
+        raise HTTPException(status_code=404, detail="Обучающий план не найден для обновления.")
+    except Exception as e:
+        logging.error(f"Ошибка при обновлении прогресса для плана {planId} пользователя {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при обновлении прогресса.")
 @app.post("/agent/chat")
 async def chat_with_agent(chat_message: AgentChatMessage, user_id: str = Depends(get_current_user)):
     if llm_model is None:
         raise HTTPException(status_code=500, detail="LLM модель не инициализирована.")
     if db is None:
         raise HTTPException(status_code=500, detail="Firestore DB не инициализирован.")
-    print(f"User {user_id} sent message to agent: {chat_message.model_dump()}")
+    logging.info(f"User {user_id} sent message to agent: {chat_message.model_dump()}")
 
     full_prompt = chat_message.message
     source_documents_info = []
 
     if chat_message.document_ids:
-        print(f"Выполнение RAG для документов: {chat_message.document_ids}")
+        logging.info(f"Выполнение RAG для документов: {chat_message.document_ids}")
         try:
             context = await retrieve_relevant_context(chat_message.message, chat_message.document_ids)
             full_prompt = f"Используя следующий контекст, ответь на вопрос: '{chat_message.message}'\n\nКонтекст:\n{context}"
             
             for doc_id in chat_message.document_ids:
                 doc_meta_ref = db.collection('users').document(user_id).collection('documents').document(doc_id)
-                doc_meta = doc_meta_ref.get()
+                doc_meta = await asyncio.to_thread(doc_meta_ref.get) # Используем asyncio.to_thread
                 if doc_meta.exists:
                     source_documents_info.append({"doc_id": doc_id, "title": doc_meta.to_dict().get("title", "Неизвестный документ")})
                 else:
-                    source_documents_info.append({"doc_id": doc_id, "title": "Документ не найден"})
+                    source_documents_info.append({"doc_id": doc_id, "title": "Документ не найден"}) # Можно логировать предупреждение, если документ не найден
 
         except HTTPException as e:
             raise e
         except Exception as e:
- # Let the global exception handler handle this
- raise e
+            # Let the global exception handler handle this
+            logging.error(f"Ошибка при выполнении RAG для пользователя {user_id}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Произошла ошибка при поиске контекста для ответа.")
     else:
-        print("Выполнение общего запроса к LLM.")
+        logging.info("Выполнение общего запроса к LLM.")
 
     try:
-        response = llm_model.generate_content(full_prompt)
+        response = await asyncio.to_thread(llm_model.generate_content, full_prompt) # Используем asyncio.to_thread
         llm_response_text = response.candidates[0].content.parts[0].text
     except Exception as e:
- # Let the global exception handler handle this
- raise e
+        logging.error(f"Ошибка при генерации ответа LLM для пользователя {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Произошла ошибка при генерации ответа LLM.")
+
     conversation_id = chat_message.conversationId or "conv_" + os.urandom(8).hex()
 
-    chat_history_ref = db.collection('users').document(user_id).collection('conversations').document(conversation_id).collection('messages')
-    chat_history_ref.add({
-        "sender": "user",
-        "message": chat_message.message,
-        "timestamp": firestore.SERVER_TIMESTAMP
-    })
-    chat_history_ref.add({
-        "sender": "agent",
-        "message": llm_response_text,
-        "timestamp": firestore.SERVER_TIMESTAMP,
-        "source_documents": source_documents_info
-    })
+    # Логика сохранения истории чата
+    try:
+        chat_history_ref = db.collection('users').document(user_id).collection('conversations').document(conversation_id).collection('messages')
+        await asyncio.to_thread(chat_history_ref.add, {
+            "sender": "user",
+            "message": chat_message.message,
+            "timestamp": firestore.SERVER_TIMESTAMP
+        })
+        await asyncio.to_thread(chat_history_ref.add, {
+            "sender": "agent",
+            "message": llm_response_text,
+            "timestamp": firestore.SERVER_TIMESTAMP,
+            "source_documents": source_documents_info
+        })
+    except Exception as e:
+        logging.error(f"Ошибка при сохранении истории чата для пользователя {user_id} (конверсия {conversation_id}): {e}", exc_info=True)
+        # В этом случае, возможно, не нужно бросать HTTPException, чтобы пользователь получил ответ,
+        # но нужно знать, что сохранение истории не удалось.
 
     return JSONResponse(status_code=200, content={
         "status": "success",
         "response": llm_response_text,
         "conversationId": conversation_id,
-        "suggestedNextSteps": ["Продолжить", "Задать другой вопрос"],
-        "sourceDocuments": source_documents_info
+        "suggestedNextSteps": ["Продолжить", "Задать другой вопрос"], # TODO: Generate dynamically?
+        "sourceDocuments": source_documents_info # Передача информации об источниках
     })
 
 @app.get("/agent/chat/history/{conversationId}")
 async def get_chat_history(conversationId: str, user_id: str = Depends(get_current_user)):
     if db is None:
         raise HTTPException(status_code=500, detail="Firestore DB не инициализирован.")
-    print(f"User {user_id} requested chat history for {conversationId}.")
+    logging.info(f"User {user_id} requested chat history for {conversationId}.")
     messages_ref = db.collection('users').document(user_id).collection('conversations').document(conversationId).collection('messages').order_by('timestamp')
     messages = []
-    for doc in messages_ref.stream():
+    # Используем asyncio.to_thread для блокирующей операции stream()
+    for doc in await asyncio.to_thread(messages_ref.stream):
         msg_data = doc.to_dict()
         messages.append(convert_timestamps_to_strings(msg_data))
     return JSONResponse(status_code=200, content={
         "status": "success",
-        "conversationId": conversation_id,
+        "conversationId": conversationId, # Исправлено на conversationId вместо conversation_id
         "messages": messages
     })
 
 # --- API для геймификации и прогресса (из спецификации) ---
 @app.post("/gamification/complete-task")
 async def complete_gamification_task(task_data: GamificationCompleteTask, user_id: str = Depends(get_current_user)):
-    print(f"User {user_id} completed task: {task_data.model_dump()}")
-    return JSONResponse(status_code=200, content={
+    logging.info(f"User {user_id} completed task: {task_data.model_dump()}")
+    # TODO: Add real logic for updating user progress, achievements, and potentially triggering Cloud Functions
+    return JSONResponse(status_code=200, content={ # This endpoint is likely a stub and needs real logic
         "status": "success",
         "message": "Задача успешно записана (заглушка).",
         "userProgress": {
@@ -1081,20 +1087,24 @@ async def complete_gamification_task(task_data: GamificationCompleteTask, user_i
 
 @app.get("/gamification/achievements")
 async def get_user_achievements(user_id: str = Depends(get_current_user)):
-    print(f"User {user_id} requested achievements.")
+    logging.info(f"User {user_id} requested achievements.")
+    # TODO: Retrieve real achievements data from Firestore or other source
     return JSONResponse(status_code=200, content={
         "status": "success",
         "achievements": [
+            # Это заглушка, замените на реальные данные
             {"achievementId": "first_lesson_completed", "name": "Первый урок", "description": "Завершил первый урок", "unlockedAt": "2025-07-22T11:00:00Z"}
         ]
     })
 
 @app.get("/gamification/stats")
 async def get_user_stats(user_id: str = Depends(get_current_user)):
-    print(f"User {user_id} requested stats.")
+    logging.info(f"User {user_id} requested stats.")
+    # TODO: Retrieve real stats data from Firestore or other source
     return JSONResponse(status_code=200, content={
         "status": "success",
         "stats": {
+            # Это заглушка, замените на реальные данные
             "totalPoints": 150,
             "completedLessonsCount": 5,
             "totalLearningTimeMinutes": 120,
@@ -1105,15 +1115,16 @@ async def get_user_stats(user_id: str = Depends(get_current_user)):
 
 @app.get("/gamification/leaderboard")
 async def get_leaderboard(sortBy: str = "totalPoints", limit: int = 10, offset: int = 0, user_id: str = Depends(get_current_user)):
-    print(f"User {user_id} requested leaderboard (sort by: {sortBy}, limit: {limit}, offset: {offset}).")
+    logging.info(f"User {user_id} requested leaderboard (sort by: {sortBy}, limit: {limit}, offset: {offset}).")
+    # TODO: Implement real leaderboard logic (query Firestore, sort, limit, offset)
     return JSONResponse(status_code=200, content={
         "status": "success",
         "leaderboard": [
+            # Это заглушка, замените на реальные данные из Firestore
             {"userId": "user1", "displayName": "Лидер 1", "totalPoints": 500, "rank": 1},
             {"userId": "user2", "displayName": "Лидер 2", "totalPoints": 450, "rank": 2}
         ]
     })
-
 # --- API для загрузки и управления файлами (с реальной логикой) ---
 @app.post("/documents/upload")
 async def upload_document(
@@ -1123,13 +1134,16 @@ async def upload_document(
     """
     Загружает и обрабатывает учебный документ, сохраняя его в Cloud Storage
     и индексируя для RAG.
+    # Перебрасываем HTTPException при ошибках
     """
-    if not storage_client or GCS_BUCKET_NAME is None:
+    if storage_client is None or GCS_BUCKET_NAME is None: # Исправлено на is None
         raise HTTPException(status_code=500, detail="Cloud Storage не инициализирован или имя бакета не установлено.")
     if not file.filename:
         raise HTTPException(status_code=400, detail="Имя файла не предоставлено.")
-    if not embedding_model:
+    if embedding_model is None: # Исправлено на is None
         raise HTTPException(status_code=500, detail="Модель эмбеддингов не инициализирована. Проверьте конфигурацию Vertex AI.")
+    if db is None: # Добавлена проверка на db
+        raise HTTPException(status_code=500, detail="Firestore DB не инициализирован.")
 
     try:
         doc_id = str(uuid.uuid4())
@@ -1140,22 +1154,24 @@ async def upload_document(
         bucket = storage_client.bucket(GCS_BUCKET_NAME)
         blob_path = f"user_documents/{user_id}/{doc_id}/{filename}"
         blob = bucket.blob(blob_path)
-        blob.upload_from_string(file_content, content_type=file.content_type)
-        gcs_public_url = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}/{blob_path}"
-        print(f"Файл '{filename}' сохранен в GCS по пути: {blob_path}")
+        # Используем asyncio.to_thread для блокирующей операции upload_from_string
+        await asyncio.to_thread(blob.upload_from_string, file_content, content_type=file.content_type)
+        gcs_public_url = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}/{blob_path}" # TODO: Consider using signed URLs for private buckets
+        logging.info(f"Файл '{filename}' сохранен в GCS по пути: {blob_path}")
 
         # 2. Извлечение текста из файла
         extracted_text = await extract_text_from_file(file_content, filename)
         if not extracted_text:
+            # extract_text_from_file уже бросает HTTPException с 422
+            # Если этот HTTPException не был брошен, но текст пустой, бросаем свой HTTPException
             raise HTTPException(status_code=422, detail="Не удалось извлечь текст из документа.")
 
         # 3. Разделение текста на фрагменты и генерация эмбеддингов
         text_chunks = await chunk_text(extracted_text)
+        # Обработка ошибок generate_embedding_for_text и store_document_chunks_in_vector_db происходит внутри этих функций
         await store_document_chunks_in_vector_db(doc_id, text_chunks)
 
         # 4. Сохранение метаданных документа в Firestore
-        if db is None:
-            raise HTTPException(status_code=500, detail="Firestore DB не инициализирован.")
         doc_metadata = {
             "id": doc_id,
             "title": filename,
@@ -1163,13 +1179,14 @@ async def upload_document(
             "gcs_path": blob_path,
             "gcs_url": gcs_public_url,
             "uploaded_at": firestore.SERVER_TIMESTAMP,
-            "processed_at": firestore.SERVER_TIMESTAMP,
+            "processed_at": firestore.SERVER_TIMESTAMP, # Указывает, что первичная обработка (извлечение текста, эмбеддинги) завершена
             "file_type": file.content_type,
             "size": len(file_content),
         }
         doc_ref = db.collection('users').document(user_id).collection('documents').document(doc_id)
-        doc_ref.set(doc_metadata)
-        print(f"Метаданные документа {doc_id} сохранены в Firestore.")
+        # Используем asyncio.to_thread для блокирующей операции set
+        await asyncio.to_thread(doc_ref.set, doc_metadata)
+        logging.info(f"Метаданные документа {doc_id} сохранены в Firestore.")
 
         return JSONResponse(status_code=201, content={
             "status": "success",
@@ -1180,41 +1197,23 @@ async def upload_document(
         })
 
     except HTTPException as http_exc:
+        # Перебрасываем HTTPException, чтобы он был пойман глобальным обработчиком
         raise http_exc
     except Exception as e:
- # Let the global exception handler handle this
- raise e
-@app.get("/files/download-url/{fileId}")
-async def get_download_url(fileId: str, user_id: str = Depends(get_current_user)):
-    if db is None or storage_client is None or GCS_BUCKET_NAME is None:
-        raise HTTPException(status_code=500, detail="Firestore DB, Cloud Storage или имя бакета не инициализированы.")
-    doc_ref = db.collection('users').document(user_id).collection('documents').document(fileId)
-    doc_data = doc_ref.get()
-    if not doc_data.exists:
-        raise HTTPException(status_code=404, detail="Файл не найден.")
-    
-    gcs_path = doc_data.to_dict().get("gcs_path")
-    if not gcs_path:
-        raise HTTPException(status_code=500, detail="Путь к файлу в GCS не найден.")
+        # Для всех остальных неожиданных ошибок
+        logging.error(f"Неожиданная ошибка при загрузке документа для пользователя {user_id}: {e}", exc_info=True)
+        # Глобальный обработчик Exception поймает это и вернет 500
+        raise e # Позволяем исключению подняться
 
-    try:
-        bucket = storage_client.bucket(GCS_BUCKET_NAME)
-        blob = bucket.blob(gcs_path)
-        signed_url = blob.generate_signed_url(expiration=3600, method='GET')
-        return JSONResponse(status_code=200, content={
-            "status": "success",
-            "downloadUrl": signed_url
-        })
- except Exception as e:
- raise HTTPException(status_code=500, detail=f"Ошибка при генерации URL для скачивания: {e}")
 @app.get("/files")
 async def get_user_files(user_id: str = Depends(get_current_user)):
     if db is None:
         raise HTTPException(status_code=500, detail="Firestore DB не инициализирован.")
-    print(f"User {user_id} requested list of files.")
+    logging.info(f"User {user_id} requested list of files.")
     files_ref = db.collection('users').document(user_id).collection('documents')
     files = []
-    for doc in files_ref.stream():
+    # Используем asyncio.to_thread для блокирующей операции stream()
+    for doc in await asyncio.to_thread(files_ref.stream):
         file_data = doc.to_dict()
         file_data['fileId'] = doc.id
         files.append(convert_timestamps_to_strings(file_data))
@@ -1226,14 +1225,14 @@ async def get_user_files(user_id: str = Depends(get_current_user)):
 # --- API для монетизации (из спецификации) ---
 @app.get("/billing/free-limit-status")
 async def get_free_limit_status(user_id: str = Depends(get_current_user)):
-    print(f"User {user_id} requested free limit status.")
+    logging.info(f"User {user_id} requested free limit status.")
     return JSONResponse(status_code=200, content={
         "status": "success",
         "freeLimitRemaining": 50,
         "limitType": "llm_queries",
         "isPremiumUser": False,
         "nextResetDate": "2025-08-01T00:00:00Z"
-    })
+    }) # This endpoint is likely a stub and needs real logic
 
 @app.post("/billing/purchase-webhook")
 async def handle_purchase_webhook(webhook_data: BillingPurchaseWebhook):
@@ -1245,7 +1244,7 @@ async def handle_purchase_webhook(webhook_data: BillingPurchaseWebhook):
 
 @app.get("/billing/subscription-status")
 async def get_subscription_status(user_id: str = Depends(get_current_user)):
-    print(f"User {user_id} requested subscription status.")
+    logging.info(f"User {user_id} requested subscription status.")
     return JSONResponse(status_code=200, content={
         "status": "success",
         "isSubscribed": True,
@@ -1254,10 +1253,7 @@ async def get_subscription_status(user_id: str = Depends(get_current_user)):
         "autoRenewing": True
     })
 
-# --- Добавлен блок для запуска Uvicorn ---
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
-
-    
