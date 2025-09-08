@@ -12,6 +12,7 @@ import {
 } from 'firebase/auth';
 import { getFirestore, doc, setDoc, getDoc, collection, addDoc } from 'firebase/firestore';
 import { getAnalytics } from 'firebase/analytics';
+import { requestNotificationPermission } from './firebaseMessaging';
 
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 const firebaseConfigFromCanvas = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
@@ -40,6 +41,7 @@ const AuthProvider = ({ children }) => {
   const [loading, setLoading] = useState(true);
   const [auth, setAuth] = useState(null);
   const [db, setDb] = useState(null);
+  const [app, setApp] = useState(null);
   const [authError, setAuthError] = useState(null);
   const [authInitialized, setAuthInitialized] = useState(false);
 
@@ -63,6 +65,7 @@ const AuthProvider = ({ children }) => {
         }
 
         const appInstance = initializeApp(firebaseConfigToUse);
+        setApp(appInstance);
         const authInstance = getAuth(appInstance);
         const firestoreInstance = getFirestore(appInstance);
         getAnalytics(appInstance);
@@ -119,6 +122,7 @@ const AuthProvider = ({ children }) => {
     currentUser,
     auth,
     db,
+    app,
     authError,
   };
 
@@ -246,7 +250,7 @@ const SummaryModal = ({ summary, onClose }) => {
 
 
 const Dashboard = () => {
-  const { currentUser, auth } = useAuth();
+  const { currentUser, auth, db, app } = useAuth();
   const { isDarkMode, toggleTheme } = useTheme();
   const [books, setBooks] = useState([]);
   const [loadingBooks, setLoadingBooks] = useState(false);
@@ -255,9 +259,20 @@ const Dashboard = () => {
   const [selectedEducationLevel, setSelectedEducationLevel] = useState(null);
   const [summarizedText, setSummarizedText] = useState(null);
   const [loadingSummary, setLoadingSummary] = useState(false);
-
+  
   const subjects = ["Математика", "Биология", "История", "Физика", "Литература", "Химия", "Информатика", "Психология"];
   const educationLevels = ["Начальные классы", "Средняя школа", "Старшие классы", "Медицинский", "Архитектурный", "Литературный", "Математический", "Физический", "Химический", "Профессиональный"];
+
+  const handleRequestNotificationToken = () => {
+    // Проверяем, что и приложение Firebase (app), и объект аутентификации (auth) готовы
+    if (app && auth) {
+      // Передаем оба объекта в нашу функцию
+      requestNotificationPermission(app, auth);
+    } else {
+      console.error("Firebase app or auth is not initialized yet.");
+      alert("Ошибка: Firebase или система аутентификации не инициализированы. Невозможно запросить токен.");
+    }
+  };
 
   const fetchWithRetry = async (url, options, retries = 3, delay = 1000) => {
     for (let i = 0; i < retries; i++) {
@@ -545,12 +560,21 @@ const Dashboard = () => {
         </div>
       </div>
 
+      {/* === ИЗМЕНЕНИЯ ЗДЕСЬ === */}
       <div className="mt-8 text-center">
         <button
           onClick={handleSignOut}
           className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
         >
           Выйти
+        </button>
+
+        {/* ВОТ ЭТА КНОПКА */}
+        <button
+          onClick={handleRequestNotificationToken}
+          className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 ml-4"
+        >
+          Получить токен для уведомлений
         </button>
       </div>
 

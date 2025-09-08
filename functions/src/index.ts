@@ -1,94 +1,126 @@
-// david/functions/src/index.ts
-import * as functions from "firebase-functions";
+// ნიშანი
+import { onUserCreated, onUserDeleted } from "firebase-functions/v2/auth";
+import { onValueCreated, onValueUpdated } from "firebase-functions/v2/database";
 import * as admin from "firebase-admin";
+import { getMessaging } from "firebase-admin/messaging";
+import { Message } from "firebase-admin/messaging";
 
-// Инициализация Firebase Admin SDK, если еще не инициализировано
-if (!admin.apps.length) {
-  admin.initializeApp();
-}
+admin.initializeApp();
 
 const db = admin.firestore();
+const messaging = getMessaging();
 
-// Ваша существующая функция helloWorld
-export const helloWorld = functions.https.onRequest((request, response) => {
-  functions.logger.info("Hello logs!", {structuredData: true});
-  response.send("Hello from Firebase!");
+// V2 Auth Triggers
+export const createUserData = onUserCreated((event) => {
+  const user = event.data;
+  const newUser = {
+    email: user.email,
+    displayName: user.displayName,
+    photoURL: user.photoURL,
+    uid: user.uid,
+    createdAt: user.metadata.creationTime,
+    role: "user",
+  };
+  return db.collection("users").doc(user.uid).set(newUser);
 });
 
-// НОВАЯ Cloud Function для обработки экспортированных данных
-export const processExportedUserData = functions.https.onRequest(async (request, response) => {
-  // Проверка метода HTTP запроса (ожидаем POST от расширения)
-  if (request.method !== 'POST') {
-    response.status(405).send('Method Not Allowed');
-    return;
-  }
+export const cleanupUserData = onUserDeleted((event) => {
+  const user = event.data;
+  return db.collection("users").doc(user.uid).delete();
+});
 
-  try {
-    // Получение данных из тела запроса (ожидаем JSON)
-    const exportData = request.body;
+// V2 Realtime Database Triggers with explicit instance
+export const onNewUserStatus = onValueCreated({ ref: "/statuses/{statusId}", instance: "ailbee" }, async (event) => {
+    const status = event.data.val();
+    const userRef = db.collection("users").doc(status.uid);
+    const userSnap = await userRef.get();
+    const userData = userSnap.data();
 
-    // --- логика обработки экспортированных данных здесь ---
-    // Примеры действий: логирование, учет в Firestore, анализ размера файлов
-
-    console.log(`Получены данные о завершении экспорта: ${exportData.exportId}`);
-    console.log(`Статус экспорта: ${exportData.status}`);
-    console.log(`Количество экспортированных файлов: ${exportData.exportedFiles ? exportData.exportedFiles.length : 0}`);
-
-    if (exportData.status === 'SUCCESS') {
-      // --- Попытка извлечь UID пользователя из данных экспорта ---
-      let userId = null;
-      if (exportData.exportParams?.firestorePath === 'users/{UID}' && exportData.exportedFiles && exportData.exportedFiles.length > 0) {
-         // Если экспортировался путь users/{UID}, и есть файлы,
-         // попробуем извлечь UID из имени файла (пример: user-UID.json)
-         const firstFilePath = exportData.exportedFiles[0].filePath;
-         const userIdMatch = firstFilePath.match(/users-([^/]+)\.json/); // Извлекаем то, что между 'users-' и '.json'
-         if (userIdMatch && userIdMatch[1]) {
-           userId = userIdMatch[1];
-           console.log(`Извлечен UID пользователя из имени файла: ${userId}`);
-         } else {
-            console.warn(`Не удалось извлечь UID пользователя из имени файла: ${firstFilePath}`);
-         }
-      } else {
-          console.log("Экспорт, вероятно, не связан с конкретным пользователем или формат пути Firestore отличается.");
-          // Здесь можно добавить логику для других сценариев определения пользователя
-      }
-      // --- Конец попытки извлечения UID ---
-      // --- *** Важное примечание по извлечению UID:** Паттерн `users-([^/]+)\.json` 
-      // для извлечения UID из имени файла является **предположением** о том,
-      // как расширение "Export User Data" называет экспортированные файлы при экспорте пути 
-      // `users/{UID}`. **Вам нужно будет протестировать это на практике и, возможно, 
-      // скорректировать регулярное выражение**, чтобы оно точно соответствовало именам файлов,
-      // создаваемых расширением.
-
-      const exportRecord = {
-        exportId: exportData.exportId,
-        status: exportData.status,
-        timestamp: new Date(exportData.timestamp),
-        firestorePath: exportData.exportParams?.firestorePath || null,
-        cloudStorageBucket: exportData.exportParams?.cloudStorageBucket || null,
-        cloudStorageFolder: exportData.exportParams?.cloudStorageFolder || null,
-        exportedFiles: exportData.exportedFiles || [],
-        processedAt: admin.firestore.FieldValue.serverTimestamp()
-      };
-      await db.collection('export_logs').doc(exportData.exportId).set(exportRecord);
-      console.log(`Информация об экспорте ${exportData.exportId} записана в Firestore.`);
-
-      let totalSizeBytes = 0;
-      if (exportData.exportedFiles) {
-        totalSizeBytes = exportData.exportedFiles.reduce((sum, file) => sum + (file.sizeBytes || 0), 0);
-      }
-      console.log(`Общий размер экспортированных данных: ${totalSizeBytes} байт.`);
-      // Здесь можно добавить логику учета расхода ресурсов
-    } else {
-      console.error(`Экспорт ${exportData.exportId} завершился с ошибкой. Детали: ${JSON.stringify(exportData)}`);
+    if (!userData || !userData.fcmTokens) {
+        console.log("User data or FCM tokens not found for UID:", status.uid);
+        return;
     }
 
-    // --- Конец логики ---
+    const tokens = Object.keys(userData.fcmTokens);
+    if (tokens.length === 0) {
+        console.log("User has no FCM tokens, skipping notification.");
+        return;
+    }
 
-    response.status(200).send('Export data processed successfully');
+    const messages: Message[] = tokens.map(token => ({
+        token: token,
+        notification: {
+          title: `New status from ${userData.displayName}`,
+          body: status.text,
+          icon: userData.photoURL,
+        }
+    }));
 
-  } catch (error) {
-    console.error('Ошибка при обработке данных экспорта:', error);
-    response.status(500).send('Error processing export data');
-  }
+    const response = await messaging.sendEach(messages);
+    const tokensToRemove: Promise<any>[] = [];
+    response.responses.forEach((result, index) => {
+        const error = result.error;
+        if (error) {
+            console.error("Failure sending notification to", tokens[index], error);
+            if (error.code === "messaging/invalid-registration-token" ||
+                error.code === "messaging/registration-token-not-registered") {
+                tokensToRemove.push(userRef.update({
+                    [`fcmTokens.${tokens[index]}`]: admin.firestore.FieldValue.delete()
+                }));
+            }
+        }
+    });
+
+    return Promise.all(tokensToRemove);
+ });
+
+export const onUserStatusChange = onValueUpdated({ ref: "/statuses/{statusId}", instance: "ailbee" }, async (event) => {
+    const after = event.data.after.val();
+    const before = event.data.before.val();
+
+    if(after.likes === before.likes) {
+        console.log("Likes haven't changed, skipping notification.");
+        return;
+    }
+
+    const userRef = db.collection("users").doc(after.uid);
+    const userSnap = await userRef.get();
+    const userData = userSnap.data();
+
+    if (!userData || !userData.fcmTokens) {
+        console.log("User data or FCM tokens not found for UID:", after.uid);
+        return;
+    }
+
+    const tokens = Object.keys(userData.fcmTokens);
+    if (tokens.length === 0) {
+        console.log("User has no FCM tokens, skipping notification.");
+        return;
+    }
+
+    const messages: Message[] = tokens.map(token => ({
+        token: token,
+        notification: {
+          title: `Status update from ${userData.displayName}`,
+          body: `Your status now has ${after.likes} likes!`,
+          icon: userData.photoURL,
+        }
+    }));
+
+    const response = await messaging.sendEach(messages);
+    const tokensToRemove: Promise<any>[] = [];
+    response.responses.forEach((result, index) => {
+        const error = result.error;
+        if (error) {
+            console.error("Failure sending notification to", tokens[index], error);
+            if (error.code === "messaging/invalid-registration-token" ||
+                error.code === "messaging/registration-token-not-registered") {
+                tokensToRemove.push(userRef.update({
+                    [`fcmTokens.${tokens[index]}`]: admin.firestore.FieldValue.delete()
+                }));
+            }
+        }
+    });
+
+    return Promise.all(tokensToRemove);
 });
