@@ -1,0 +1,39 @@
+{
+	"motd": {
+		"cloudBuildErrorAfter": 1594252800000,
+		"cloudBuildWarnAfter": 1590019200000,
+		"defaultNode10After": 1594252800000,
+		"minVersion": "3.0.5",
+		"node8DeploysDisabledAfter": 1613390400000,
+		"node8RuntimeDisabledAfter": 1615809600000,
+		"node8WarnAfter": 1600128000000,
+		"fetched": 1758197759508
+	},
+	"activeProjects": {
+		"/home/david": "ailbee",
+		"/home/david/fun-react-frontend": "aituiton"
+	},
+	"emulator-analytics-clientId": "7be8a2b3-4645-4502-9106-3f4101e6b42e",
+	"loginScopes": [
+		"email",
+		"openid",
+		"https://www.googleapis.com/auth/cloudplatformprojects.readonly",
+		"https://www.googleapis.com/auth/firebase",
+		"https://www.googleapis.com/auth/cloud-platform"
+	],
+	"additionalAccounts": [],
+	"activeAccounts": {},
+	"usage": true,
+	"webconfig": {
+		"aituiton": {
+			"projectId": "aituiton",
+			"appId": "1:846044110047:web:2db14863bfe31789655d6a",
+			"storageBucket": "aituiton.firebasestorage.app",
+			"apiKey": "AIzaSyC0KQkhI1VQhT38J97SfosbO5fPN0PvDds",
+			"authDomain": "aituiton.firebaseapp.com",
+			"messagingSenderId": "846044110047",
+			"measurementId": "G-ZTXDQ7BZ7C"
+		}
+	},
+	"analytics-uuid": "5eda1015-b8d8-4055-9344-c21191c63103"
+}

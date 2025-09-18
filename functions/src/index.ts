@@ -1,6 +1,5 @@
 // ნიშანი
-import { onUserCreated, onUserDeleted } from "firebase-functions/v2/auth";
-import { onValueCreated, onValueUpdated } from "firebase-functions/v2/database";
+import * as functions from "firebase-functions/v1";
 import * as admin from "firebase-admin";
 import { getMessaging } from "firebase-admin/messaging";
 import { Message } from "firebase-admin/messaging";
@@ -10,9 +9,8 @@ admin.initializeApp();
 const db = admin.firestore();
 const messaging = getMessaging();
 
-// V2 Auth Triggers
-export const createUserData = onUserCreated((event) => {
-  const user = event.data;
+// V1 Auth Triggers
+export const createUserData = functions.auth.user().onCreate((user) => {
   const newUser = {
     email: user.email,
     displayName: user.displayName,
@@ -24,14 +22,13 @@ export const createUserData = onUserCreated((event) => {
   return db.collection("users").doc(user.uid).set(newUser);
 });
 
-export const cleanupUserData = onUserDeleted((event) => {
-  const user = event.data;
+export const cleanupUserData = functions.auth.user().onDelete((user) => {
   return db.collection("users").doc(user.uid).delete();
 });
 
-// V2 Realtime Database Triggers with explicit instance
-export const onNewUserStatus = onValueCreated({ ref: "/statuses/{statusId}", instance: "ailbee" }, async (event) => {
-    const status = event.data.val();
+// V1 Realtime Database Triggers with explicit instance
+export const onNewUserStatus = functions.database.instance("ailbee").ref("/statuses/{statusId}").onCreate(async (snapshot, context) => {
+    const status = snapshot.val();
     const userRef = db.collection("users").doc(status.uid);
     const userSnap = await userRef.get();
     const userData = userSnap.data();
@@ -74,9 +71,9 @@ export const onNewUserStatus = onValueCreated({ ref: "/statuses/{statusId}", ins
     return Promise.all(tokensToRemove);
  });
 
-export const onUserStatusChange = onValueUpdated({ ref: "/statuses/{statusId}", instance: "ailbee" }, async (event) => {
-    const after = event.data.after.val();
-    const before = event.data.before.val();
+export const onUserStatusChange = functions.database.instance("ailbee").ref("/statuses/{statusId}").onUpdate(async (change, context) => {
+    const after = change.after.val();
+    const before = change.before.val();
 
     if(after.likes === before.likes) {
         console.log("Likes haven't changed, skipping notification.");
