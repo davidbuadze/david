@@ -38,3 +38,6 @@ git config --global user.name "davidbuadze"
 git add .  
 git commit -m “Update”  
 git push origin main
+git add .  
+git commit -m “Update”  
+git push origin main
