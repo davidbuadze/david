@@ -35,3 +35,6 @@ git commit -m “Update”
 git push origin main
 git config --global user.email "david@buadze.com"
 git config --global user.name "davidbuadze"
+git add .  
+git commit -m “Update”  
+git push origin main
